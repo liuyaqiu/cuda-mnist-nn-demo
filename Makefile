@@ -34,44 +34,76 @@
 # Define the compiler and flags
 NVCC = /usr/local/cuda/bin/nvcc
 CXX = g++
-CXXFLAGS = -std=c++11 -I/usr/local/cuda/include -Iinclude
-LDFLAGS = -L/usr/local/cuda/lib64 -lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc
+
+# Auto-detect GPU architecture
+GPU_ARCH := $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits | head -1 | sed 's/\.//g')
+ARCH_FLAG := -arch=sm_$(GPU_ARCH)
+
+NVCCFLAGS = $(ARCH_FLAG) --std=c++11 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -I$(LIB_DIR)
+CXXFLAGS = -std=c++11 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL
+LDFLAGS = -L/usr/local/cuda/lib64 -L$(LIB_DIR) -LCommon/lib -lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc -lfreeimage
 
 # Define directories
 SRC_DIR = src
 BIN_DIR = bin
-DATA_DIR = data
 LIB_DIR = lib
+INPUT_DIR = data/input
+OUTPUT_DIR = data/output
+
+# Default input/output files (can be overridden)
+INPUT_FILE ?= $(INPUT_DIR)/Lena_gray.png
+OUTPUT_FILE ?= $(OUTPUT_DIR)/Lena_gray_rotated.png
 
 # Define source files and target executable
 SRC = $(SRC_DIR)/imageRotationNPP.cpp
 TARGET = $(BIN_DIR)/imageRotationNPP
 
-# Define the default rule
-all: $(TARGET)
+# Build target
+build: $(TARGET)
 
 # Rule for building the target executable
 $(TARGET): $(SRC)
 	mkdir -p $(BIN_DIR)
-	$(NVCC) $(CXXFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
+	@echo "Detected GPU architecture: sm_$(GPU_ARCH)"
+	$(NVCC) $(NVCCFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
 
 # Rule for running the application
 run: $(TARGET)
-	./$(TARGET) --input $(DATA_DIR)/Lena.png --output $(DATA_DIR)/Lena_rotated.png
+	@echo "Running with input: $(INPUT_FILE), output: $(OUTPUT_FILE)"
+	./$(TARGET) --input $(INPUT_FILE) --output $(OUTPUT_FILE)
 
 # Clean up
 clean:
 	rm -rf $(BIN_DIR)/*
+	rm -rf $(OUTPUT_DIR)/*
 
-# Installation rule (not much to install, but here for completeness)
-install:
-	@echo "No installation required."
+# Show GPU information
+gpu-info:
+	@echo "GPU Information:"
+	@nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+	@echo "Detected architecture flag: $(ARCH_FLAG)"
+
+# Generate compile_commands.json for VS Code IntelliSense using bear
+compile-commands:
+	@echo "Generating compile_commands.json using bear..."
+	@rm -f compile_commands.json
+	bear --output compile_commands.json -- make clean build
+	@echo "compile_commands.json generated successfully!"
 
 # Help command
 help:
 	@echo "Available make commands:"
 	@echo "  make        - Build the project."
-	@echo "  make run    - Run the project."
+	@echo "  make build  - Build the project."
+	@echo "  make run    - Run the project with default files."
 	@echo "  make clean  - Clean up the build files."
-	@echo "  make install- Install the project (if applicable)."
+	@echo "  make gpu-info - Show detected GPU information."
+	@echo "  make compile-commands - Generate compile_commands.json using bear."
 	@echo "  make help   - Display this help message."
+	@echo ""
+	@echo "You can override input/output files:"
+	@echo "  make run INPUT_FILE=path/to/input.png OUTPUT_FILE=path/to/output.png"
+	@echo ""
+	@echo "Default files:"
+	@echo "  INPUT_FILE  = $(INPUT_FILE)"
+	@echo "  OUTPUT_FILE = $(OUTPUT_FILE)"

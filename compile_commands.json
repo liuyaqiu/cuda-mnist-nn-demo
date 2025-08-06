@@ -1,0 +1,56 @@
+[
+  {
+    "arguments": [
+      "/usr/local/cuda/bin/nvcc",
+      "-c",
+      "-arch=sm_86",
+      "--std=c++11",
+      "-I/usr/local/cuda/include",
+      "-Iinclude",
+      "-ICommon",
+      "-ICommon/UtilNPP",
+      "-ICommon/GL",
+      "-Ilib",
+      "-o",
+      "bin/imageRotationNPP",
+      "src/imageRotationNPP.cpp"
+    ],
+    "directory": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo",
+    "file": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo/src/imageRotationNPP.cpp",
+    "output": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo/bin/imageRotationNPP"
+  },
+  {
+    "arguments": [
+      "/usr/local/bin/gcc",
+      "-std=c++11",
+      "-D__CUDA_ARCH_LIST__=860",
+      "-D__NV_LEGACY_LAUNCH",
+      "-c",
+      "-x",
+      "c++",
+      "-D__NVCC__",
+      "-Wno-psabi",
+      "-I/usr/local/cuda/include",
+      "-Iinclude",
+      "-ICommon",
+      "-ICommon/UtilNPP",
+      "-ICommon/GL",
+      "-Ilib",
+      "-I/usr/local/cuda/bin/../targets/x86_64-linux/include",
+      "-D__CUDACC_VER_MAJOR__=12",
+      "-D__CUDACC_VER_MINOR__=9",
+      "-D__CUDACC_VER_BUILD__=86",
+      "-D__CUDA_API_VER_MAJOR__=12",
+      "-D__CUDA_API_VER_MINOR__=9",
+      "-D__NVCC_DIAG_PRAGMA_SUPPORT__=1",
+      "-D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1",
+      "-m64",
+      "-o",
+      "/tmp/tmpxft_0033925a_00000000-5_imageRotationNPP.o",
+      "src/imageRotationNPP.cpp"
+    ],
+    "directory": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo",
+    "file": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo/src/imageRotationNPP.cpp",
+    "output": "/tmp/tmpxft_0033925a_00000000-5_imageRotationNPP.o"
+  }
+]
