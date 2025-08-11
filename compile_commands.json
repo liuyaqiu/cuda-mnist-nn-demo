@@ -12,12 +12,12 @@
       "-ICommon/GL",
       "-Ilib",
       "-o",
-      "bin/imageRotationNPP",
-      "src/imageRotationNPP.cpp"
+      "bin/imageEdgeDetection",
+      "src/imageEdgeDetection.cpp"
     ],
     "directory": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo",
-    "file": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo/src/imageRotationNPP.cpp",
-    "output": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo/bin/imageRotationNPP"
+    "file": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo/src/imageEdgeDetection.cpp",
+    "output": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo/bin/imageEdgeDetection"
   },
   {
     "arguments": [
@@ -46,11 +46,11 @@
       "-D__CUDACC_DEVICE_ATOMIC_BUILTINS__=1",
       "-m64",
       "-o",
-      "/tmp/tmpxft_0033925a_00000000-5_imageRotationNPP.o",
-      "src/imageRotationNPP.cpp"
+      "/tmp/tmpxft_00235520_00000000-5_imageEdgeDetection.o",
+      "src/imageEdgeDetection.cpp"
     ],
     "directory": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo",
-    "file": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo/src/imageRotationNPP.cpp",
-    "output": "/tmp/tmpxft_0033925a_00000000-5_imageRotationNPP.o"
+    "file": "/home/liuyaqiu/code/HPC-learn/GPU-programming/cuda-image-processing-demo/src/imageEdgeDetection.cpp",
+    "output": "/tmp/tmpxft_00235520_00000000-5_imageEdgeDetection.o"
   }
 ]

@@ -61,3 +61,13 @@ bool printfNPPinfo(int argc, char *argv[])
     bool bVal = checkCudaCapabilities(1, 0);
     return bVal;
 }
+
+bool checkFileExists(const std::string &filename) {
+    std::ifstream infile(filename.data(), std::ifstream::in);
+    if (infile.good()) {
+        infile.close();
+        return true;
+    }
+    infile.close();
+    return false;
+}

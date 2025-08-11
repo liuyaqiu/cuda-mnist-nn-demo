@@ -39,33 +39,61 @@ CXX = g++
 GPU_ARCH := $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits | head -1 | sed 's/\.//g')
 ARCH_FLAG := -arch=sm_$(GPU_ARCH)
 
-NVCCFLAGS = $(ARCH_FLAG) --std=c++11 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -I$(LIB_DIR)
+# CUDA compilation flags - added support for device code compilation
+NVCCFLAGS = $(ARCH_FLAG) --std=c++11 \
+	-I/usr/local/cuda/include \
+	-Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -I$(LIB_DIR) \
+	--relocatable-device-code=true \
+	--compile
+
+# Additional flags for linking CUDA device code
+NVCC_LINK_FLAGS = $(ARCH_FLAG) --std=c++11 \
+	-I/usr/local/cuda/include \
+	-Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -I$(LIB_DIR)
+
 CXXFLAGS = -std=c++11 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL
-LDFLAGS = -L/usr/local/cuda/lib64 -L$(LIB_DIR) -LCommon/lib -lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc -lfreeimage
+
+# Updated library flags - added math library for CUDA math functions
+LDFLAGS = -L/usr/local/cuda/lib64 -L$(LIB_DIR) -LCommon/lib \
+	-lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc \
+	-lfreeimage -lm
 
 # Define directories
 SRC_DIR = src
 BIN_DIR = bin
+OBJ_DIR = obj
 LIB_DIR = lib
 INPUT_DIR = data/input
 OUTPUT_DIR = data/output
 
 # Default input/output files (can be overridden)
-INPUT_FILE ?= $(INPUT_DIR)/Lena_gray.png
-OUTPUT_FILE ?= $(OUTPUT_DIR)/Lena_gray_rotated.png
+INPUT_FILE ?= $(INPUT_DIR)/Splash_gray.png
+OUTPUT_FILE ?= $(OUTPUT_DIR)/Splash_gray_edge.png
 
 # Define source files and target executable
-SRC = $(SRC_DIR)/imageRotationNPP.cpp
-TARGET = $(BIN_DIR)/imageRotationNPP
+SRC = $(SRC_DIR)/imageEdgeDetection.cu
+TARGET = $(BIN_DIR)/imageEdgeDetection
+OBJ = $(OBJ_DIR)/imageEdgeDetection.o
 
 # Build target
 build: $(TARGET)
 
-# Rule for building the target executable
-$(TARGET): $(SRC)
+# Create necessary directories
+$(OBJ_DIR):
+	mkdir -p $(OBJ_DIR)
+
+$(BIN_DIR):
 	mkdir -p $(BIN_DIR)
-	@echo "Detected GPU architecture: sm_$(GPU_ARCH)"
-	$(NVCC) $(NVCCFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
+
+# Rule for compiling CUDA source to object file
+$(OBJ): $(SRC) | $(OBJ_DIR)
+	@echo "Compiling CUDA source with detected GPU architecture: sm_$(GPU_ARCH)"
+	$(NVCC) $(NVCCFLAGS) $(SRC) -o $(OBJ)
+
+# Rule for linking to create final executable
+$(TARGET): $(OBJ) | $(BIN_DIR)
+	@echo "Linking executable with CUDA device code"
+	$(NVCC) $(NVCC_LINK_FLAGS) $(OBJ) -o $(TARGET) $(LDFLAGS)
 
 # Rule for running the application
 run: $(TARGET)
@@ -75,6 +103,7 @@ run: $(TARGET)
 # Clean up
 clean:
 	rm -rf $(BIN_DIR)/*
+	rm -rf $(OBJ_DIR)/*
 	rm -rf $(OUTPUT_DIR)/*
 
 # Show GPU information
@@ -82,6 +111,14 @@ gpu-info:
 	@echo "GPU Information:"
 	@nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
 	@echo "Detected architecture flag: $(ARCH_FLAG)"
+
+# Test CUDA compilation
+test-cuda:
+	@echo "Testing CUDA compilation..."
+	@echo "NVCC path: $(NVCC)"
+	@$(NVCC) --version
+	@echo "GPU Architecture: $(GPU_ARCH)"
+	@echo "Architecture flag: $(ARCH_FLAG)"
 
 # Generate compile_commands.json for VS Code IntelliSense using bear
 compile-commands:
@@ -93,13 +130,14 @@ compile-commands:
 # Help command
 help:
 	@echo "Available make commands:"
-	@echo "  make        - Build the project."
-	@echo "  make build  - Build the project."
-	@echo "  make run    - Run the project with default files."
-	@echo "  make clean  - Clean up the build files."
-	@echo "  make gpu-info - Show detected GPU information."
+	@echo "  make              - Build the project (2-step: compile then link)."
+	@echo "  make build        - Build the project (2-step: compile then link)."
+	@echo "  make run          - Run the project with default files."
+	@echo "  make clean        - Clean up the build files."
+	@echo "  make gpu-info     - Show detected GPU information."
+	@echo "  make test-cuda    - Test CUDA compilation setup."
 	@echo "  make compile-commands - Generate compile_commands.json using bear."
-	@echo "  make help   - Display this help message."
+	@echo "  make help         - Display this help message."
 	@echo ""
 	@echo "You can override input/output files:"
 	@echo "  make run INPUT_FILE=path/to/input.png OUTPUT_FILE=path/to/output.png"
@@ -107,3 +145,6 @@ help:
 	@echo "Default files:"
 	@echo "  INPUT_FILE  = $(INPUT_FILE)"
 	@echo "  OUTPUT_FILE = $(OUTPUT_FILE)"
+	@echo ""
+	@echo "Note: The project contains CUDA device code (__global__ kernels)."
+	@echo "If you encounter compilation issues, try 'make build-simple' instead."

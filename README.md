@@ -1,8 +1,8 @@
-# Image Rotation using NVIDIA NPP with CUDA
+# Image Edge dection using NVIDIA NPP with CUDA
 
 ## Overview
 
-This project demonstrates the use of NVIDIA Performance Primitives (NPP) library with CUDA to perform image rotation. The goal is to utilize GPU acceleration to efficiently rotate a given image by a specified angle, leveraging the computational power of modern GPUs. The project is a part of the CUDA at Scale for the Enterprise course and serves as a template for understanding how to implement basic image processing operations using CUDA and NPP.
+This project demonstrates the use of NVIDIA Performance Primitives (NPP) library with CUDA to perform image edge detection. The goal is to utilize GPU acceleration to efficiently rotate a given image by a specified angle, leveraging the computational power of modern GPUs. The project is a part of the CUDA at Scale for the Enterprise course and serves as a template for understanding how to implement basic image processing operations using CUDA and NPP.
 
 ## Code Organization
 
@@ -79,4 +79,44 @@ Now the `make build` will detect GPU model automatically and set the correspondi
 * `make run`: run the binary with example data
 * `make clean`: delete the binary
 * `make gpu-info`: show the GPU information.
+* `make test-cuda`: show cuda version and nvcc path.
 * `make compile-commands`: generate the `compile_commands.json`
+
+## Demo output
+If you execute the script, it will clean and rebuild the binary, then execute with the demo input file `data/input/Splash_gray.png`:
+```bash
+./run.sh
+```
+
+Then if will output the following in your terminal:
+```
+rm -rf bin/*
+rm -rf obj/*
+rm -rf data/output/*
+Compiling CUDA source with detected GPU architecture: sm_86
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++11 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib --relocatable-device-code=true --compile src/imageEdgeDetection.cu -o obj/imageEdgeDetection.o
+Linking executable with CUDA device code
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++11 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib obj/imageEdgeDetection.o -o bin/imageEdgeDetection -L/usr/local/cuda/lib64 -Llib -LCommon/lib -lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc -lfreeimage -lm
+Running with input: data/input/Splash_gray.png, output: data/output/Splash_gray_edge.png
+./bin/imageEdgeDetection --input data/input/Splash_gray.png --output data/output/Splash_gray_edge.png
+./bin/imageEdgeDetection Starting...
+
+GPU Device 0: "Ampere" with compute capability 8.6
+
+NPP Library Version 12.4.1
+  CUDA Driver  Version: 12.2
+  CUDA Runtime Version: 12.9
+  Device 0: <          Ampere >, Compute SM 8.6 detected
+nppiRotate opened: <data/input/Splash_gray.png> successfully!
+Save to data/output/Splash_gray_edge_noise_reduced.png
+Debug: Image size = 200x200
+Debug: oSizeROI = 200x200
+Save to data/output/Splash_gray_edge_magnitude.png
+Running NMS...
+Saved output image to data/output/Splash_gray_edge.png
+```
+
+You could see the output files:
+* `data/output/Splash_gray_edge_noise_reduced.png`: The output image after Gauss filter.
+* `data/output/Splash_gray_edge_magnitude.png`: the output image after gradient calculation.
+* `data/output/Splash_gray_edge.png`: the final edge style outpt image.
