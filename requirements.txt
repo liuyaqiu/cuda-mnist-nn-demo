@@ -1,0 +1,14 @@
+# Python dependencies for MNIST dataset processing and visualization
+
+# Core scientific computing
+numpy>=1.19.0
+
+# Image visualization
+matplotlib>=3.3.0
+
+# Image processing and saving
+Pillow>=8.0.0
+
+# Optional: For additional image processing capabilities
+# opencv-python>=4.5.0
+# scikit-image>=0.18.0
