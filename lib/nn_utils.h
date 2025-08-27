@@ -10,13 +10,13 @@
 #define HANDLE_CUTENSOR_ERROR(x)                                             \
 { const auto err = x;                                               \
     if( err != CUTENSOR_STATUS_SUCCESS )                              \
-    { printf("cuTENSOR Error: %s\n", cutensorGetErrorString(err)); exit(-1); } \
+    { printf("cuTENSOR Error in %s at %s:%d: %s\n", __func__, __FILE__, __LINE__, cutensorGetErrorString(err)); exit(-1); } \
 };
 
 #define HANDLE_CUDA_ERROR(x)                                      \
 { const auto err = x;                                             \
     if( err != cudaSuccess )                                        \
-    { printf("CUDA Error: %s\n", cudaGetErrorString(err)); exit(-1); } \
+    { printf("CUDA Error in %s at %s:%d: %s\n", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); exit(-1); } \
 };
 
 class NeuralLayer {
