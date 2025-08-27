@@ -21,6 +21,12 @@
 
 class NeuralLayer {
 public:
+    // Static function to set random seed for weight initialization
+    static void set_random_seed(unsigned int seed);
+    
+    // Static function to get a time-based random seed
+    static unsigned int get_time_based_seed();
+    
     // Constructor
     NeuralLayer(int input_elements, int output_elements, bool non_linear_activate);
     
@@ -33,8 +39,8 @@ public:
     // Backward pass: compute gradients dW, db, dx given dy
     void backward(const float* input_vec, const float* dy, float* dW, float* db, float* dx);
     
-    // Update parameters: W = W + dW, b = b + db
-    void update_parameters(const float* dW, const float* db);
+    // Update parameters: W = W - learning_rate * dW, b = b - learning_rate * db (gradient descent)
+    void update_parameters(const float* dW, const float* db, float learning_rate);
     
     // Getters
     int get_input_elements() const { return input_elements_; }
@@ -94,6 +100,12 @@ private:
 
 class NeuralNetwork {
 public:
+    // Static function to set random seed for all weight initialization
+    static void set_random_seed(unsigned int seed);
+    
+    // Static function to get a time-based random seed
+    static unsigned int get_time_based_seed();
+    
     // Constructor: takes a vector of layer sizes (e.g., {784, 128, 64, 10})
     // All layers except the last will have ReLU activation
     // The last layer will have no activation (for softmax + cross-entropy)
@@ -111,7 +123,8 @@ public:
     // Backward pass: computes gradients and updates all layer parameters
     // input: same input vector used in forward pass
     // target: same target vector used in forward pass
-    void backward(const float* input, const float* target);
+    // learning_rate: learning rate for parameter updates
+    void backward(const float* input, const float* target, float learning_rate);
     
     // Get prediction (index of maximum output)
     int predict(const float* input);

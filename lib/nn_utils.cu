@@ -6,14 +6,43 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <ctime>
 
 // Note: ReLU activation and derivative are now handled by cuTensor operations only
 
-// CUDA kernel for parameter update
-__global__ void update_parameters_kernel(float* params, const float* grads, int size) {
+// Static function implementations for random seed
+void NeuralLayer::set_random_seed(unsigned int seed) {
+    std::srand(seed);
+    printf("DEBUG: Random seed set to %u for NeuralLayer\n", seed);
+}
+
+unsigned int NeuralLayer::get_time_based_seed() {
+    unsigned int seed = static_cast<unsigned int>(std::time(nullptr));
+    printf("DEBUG: Generated time-based seed: %u\n", seed);
+    return seed;
+}
+
+void NeuralNetwork::set_random_seed(unsigned int seed) {
+    NeuralLayer::set_random_seed(seed);  // Delegate to layer implementation
+    printf("DEBUG: Random seed set to %u for NeuralNetwork\n", seed);
+}
+
+unsigned int NeuralNetwork::get_time_based_seed() {
+    return NeuralLayer::get_time_based_seed();  // Delegate to layer implementation
+}
+
+// CUDA kernel for adding epsilon to softmax_output
+__global__ void add_epsilon_kernel(float* data, int size, float epsilon) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        params[idx] += grads[idx];
+        data[idx] += epsilon;
+    }
+}
+// CUDA kernel for parameter update with learning rate
+__global__ void update_parameters_kernel(float* params, const float* grads, int size, float learning_rate) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        params[idx] -= learning_rate * grads[idx];  // Subtract for gradient descent
     }
 }
 
@@ -23,6 +52,14 @@ __global__ void outer_product_kernel(const float* x, const float* dz, float* dW,
     int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i < input_size && j < output_size) {
         dW[i * output_size + j] = x[i] * dz[j];
+    }
+}
+
+// CUDA kernel to fill tensor with a scalar value
+__global__ void fill_tensor_kernel(float* data, float value, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        data[idx] = value;
     }
 }
 
@@ -348,15 +385,15 @@ void NeuralLayer::backward(const float* input_vec, const float* dy, float* dW, f
     HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
 }
 
-void NeuralLayer::update_parameters(const float* dW, const float* db) {
-    // Update weights: W = W + dW
+void NeuralLayer::update_parameters(const float* dW, const float* db, float learning_rate) {
+    // Update weights: W = W - learning_rate * dW (gradient descent)
     dim3 blockSize(256);
     dim3 gridSize_W((input_elements_ * output_elements_ + blockSize.x - 1) / blockSize.x);
-    update_parameters_kernel<<<gridSize_W, blockSize, 0, stream_>>>(W_d_, dW, input_elements_ * output_elements_);
+    update_parameters_kernel<<<gridSize_W, blockSize, 0, stream_>>>(W_d_, dW, input_elements_ * output_elements_, learning_rate);
     
-    // Update biases: b = b + db
+    // Update biases: b = b - learning_rate * db (gradient descent)
     dim3 gridSize_b((output_elements_ + blockSize.x - 1) / blockSize.x);
-    update_parameters_kernel<<<gridSize_b, blockSize, 0, stream_>>>(b_d_, db, output_elements_);
+    update_parameters_kernel<<<gridSize_b, blockSize, 0, stream_>>>(b_d_, db, output_elements_, learning_rate);
     
     // Synchronize stream
     HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
@@ -628,11 +665,9 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
     std::vector<int64_t> extentScalar = {};  // Empty for scalar
     std::vector<int32_t> modeScalarInt = {}; // Empty for scalar
     
-    cutensorTensorDescriptor_t descInput, descMax, descOnes, descMaxBroadcast;
+    cutensorTensorDescriptor_t descInput, descMax;
     HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descInput, 1, extentInput.data(), nullptr, dataType, kAlignment));
     HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descMax, 0, nullptr, nullptr, dataType, kAlignment));  // Scalar
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descOnes, 1, extentInput.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descMaxBroadcast, 1, extentInput.data(), nullptr, dataType, kAlignment));
     
     // Create reduction operation for finding max
     cutensorOperationDescriptor_t descReduction;
@@ -666,100 +701,36 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
     HANDLE_CUTENSOR_ERROR(cutensorReduce(cutensor_handle_, planReduction,
         &alpha, input, &beta, max_values_d_, max_values_d_, workspace, workspaceSize, stream_));
     
-    // Step 2: Broadcast max to full tensor using contraction
-    printf("Step 2: Broadcasting max using cuTENSOR contraction...\n");
+    // Step 2: Manually broadcast max to full tensor, then subtract using cuTENSOR elementwise binary
+    printf("Step 2: Manually broadcasting max and subtracting using cuTENSOR elementwise binary...\n");
     
-    // Create ones tensor using cuTENSOR broadcasting (no custom kernels)
-    float* ones_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&ones_d, size * sizeof(float)));
+    // Create max broadcast tensor
+    float* max_broadcast_d;
+    HANDLE_CUDA_ERROR(cudaMalloc(&max_broadcast_d, size * sizeof(float)));
     
-    // Create scalar 1.0
-    float* scalar_one_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&scalar_one_d, sizeof(float)));
-    float one = 1.0f;
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(scalar_one_d, &one, sizeof(float), cudaMemcpyHostToDevice, stream_));
+    // Copy max value to host, then broadcast to device tensor
+    float max_value_h;
+    HANDLE_CUDA_ERROR(cudaMemcpyAsync(&max_value_h, max_values_d_, sizeof(float), cudaMemcpyDeviceToHost, stream_));
+    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_)); // Wait for copy to complete
     
-    // Create scalar tensor descriptor
-    cutensorTensorDescriptor_t descScalarOne;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descScalarOne, 0, nullptr, nullptr, dataType, kAlignment));
+    // Fill broadcast tensor with max value using a simple loop on device
+    dim3 blockSize(256);
+    dim3 gridSize((size + blockSize.x - 1) / blockSize.x);
     
-    // Create dummy tensor (all zeros) to fill with ones
-    HANDLE_CUDA_ERROR(cudaMemset(ones_d, 0, size * sizeof(float)));
+    // Launch kernel to fill the tensor with max value
+    fill_tensor_kernel<<<gridSize, blockSize, 0, stream_>>>(max_broadcast_d, max_value_h, size);
     
-    // Use contraction to broadcast scalar 1.0 to full tensor: ones = 1.0 * dummy + 1.0 * scalar_one
-    // But since dummy is zeros, this becomes: ones = 1.0 * scalar_one broadcasted
-    cutensorOperationDescriptor_t descFillOnes;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateContraction(cutensor_handle_, &descFillOnes,
-        descScalarOne, modeScalarInt.data(), CUTENSOR_OP_IDENTITY,   // scalar 1.0
-        descOnes, modeInputInt.data(), CUTENSOR_OP_IDENTITY,         // dummy zeros tensor (to get shape)
-        descOnes, modeInputInt.data(), CUTENSOR_OP_IDENTITY,         // output ones tensor
-        descOnes, modeInputInt.data(),                               // final output
-        descCompute));
+    // Create tensor descriptor for max broadcast
+    cutensorTensorDescriptor_t descMaxBroadcast;
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descMaxBroadcast, 1, extentInput.data(), nullptr, dataType, kAlignment));
     
-    cutensorPlanPreference_t planPrefFillOnes;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefFillOnes, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeFillOnes = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descFillOnes, planPrefFillOnes, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeFillOnes));
-    
-    cutensorPlan_t planFillOnes;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planFillOnes, descFillOnes, planPrefFillOnes, workspaceSizeFillOnes));
-    
-    void* workspaceFillOnes = nullptr;
-    if (workspaceSizeFillOnes > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceFillOnes, workspaceSizeFillOnes));
-    }
-    
-    // Execute contraction to fill with ones
-    HANDLE_CUTENSOR_ERROR(cutensorContract(cutensor_handle_, planFillOnes,
-        &alpha, scalar_one_d, ones_d, &beta, ones_d, ones_d,
-        workspaceFillOnes, workspaceSizeFillOnes, stream_));
-    
-    // Cleanup ones creation resources
-    HANDLE_CUDA_ERROR(cudaFree(scalar_one_d));
-    if (workspaceFillOnes) HANDLE_CUDA_ERROR(cudaFree(workspaceFillOnes));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planFillOnes));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descFillOnes));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descScalarOne));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefFillOnes));
-    
-    // Create contraction to broadcast: max_broadcast = max_scalar * ones
-    cutensorOperationDescriptor_t descContraction;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateContraction(cutensor_handle_, &descContraction,
-        descMax, modeScalarInt.data(), CUTENSOR_OP_IDENTITY,      // scalar max
-        descOnes, modeInputInt.data(), CUTENSOR_OP_IDENTITY,      // ones tensor
-        descMaxBroadcast, modeInputInt.data(), CUTENSOR_OP_IDENTITY, // dummy
-        descMaxBroadcast, modeInputInt.data(),                    // output
-        descCompute));
-    
-    cutensorPlanPreference_t planPrefContract;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefContract, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeContract = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descContraction, planPrefContract, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeContract));
-    
-    cutensorPlan_t planContract;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planContract, descContraction, planPrefContract, workspaceSizeContract));
-    
-    void* workspaceContract = nullptr;
-    if (workspaceSizeContract > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceContract, workspaceSizeContract));
-    }
-    
-    // Execute contraction to broadcast max
-    HANDLE_CUTENSOR_ERROR(cutensorContract(cutensor_handle_, planContract,
-        &alpha, max_values_d_, ones_d, &beta, temp_storage_d_, temp_storage_d_, 
-        workspaceContract, workspaceSizeContract, stream_));
-    
-    // Step 3: Subtract broadcasted max from input using element-wise binary
-    printf("Step 3: Subtracting max using cuTENSOR element-wise binary...\n");
-    
+    // Create elementwise binary operation for subtraction: output = input - max_broadcast
     cutensorOperationDescriptor_t descSubtract;
     HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseBinary(cutensor_handle_, &descSubtract,
-        descInput, modeInputInt.data(), CUTENSOR_OP_IDENTITY,        // input
-        descMaxBroadcast, modeInputInt.data(), CUTENSOR_OP_IDENTITY, // broadcasted max
-        descInput, modeInputInt.data(),                              // output = input - max
-        CUTENSOR_OP_ADD, descCompute));                              // Will use gamma=-1.0 for subtraction
+        descInput, modeInputInt.data(), CUTENSOR_OP_IDENTITY,        // input tensor
+        descMaxBroadcast, modeInputInt.data(), CUTENSOR_OP_IDENTITY, // max broadcast tensor
+        descInput, modeInputInt.data(),                              // output tensor
+        CUTENSOR_OP_ADD, descCompute));                              // Use ADD with negative gamma for subtraction
     
     cutensorPlanPreference_t planPrefSubtract;
     HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefSubtract, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
@@ -778,10 +749,10 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
     // Execute subtraction: output = 1.0 * input + (-1.0) * max_broadcast
     float gamma = -1.0f;
     HANDLE_CUTENSOR_ERROR(cutensorElementwiseBinaryExecute(cutensor_handle_, planSubtract,
-        &alpha, input, &gamma, temp_storage_d_, output, stream_));
+        &alpha, input, &gamma, max_broadcast_d, output, stream_));
     
-    // Step 4: Apply exp using cuTENSOR unary operation with CUTENSOR_OP_EXP
-    printf("Step 4: Applying exp using cuTENSOR unary operation CUTENSOR_OP_EXP...\n");
+    // Step 3: Apply exp using cuTENSOR unary operation with CUTENSOR_OP_EXP
+    printf("Step 3: Applying exp using cuTENSOR unary operation CUTENSOR_OP_EXP...\n");
     
     // Create unary operation for exp: output = exp(input)
     cutensorOperationDescriptor_t descExp;
@@ -817,9 +788,9 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefExp));
     
     printf("DEBUG: cuTENSOR exp operation completed\n");
-    
-    // Step 5: Sum exp values using cuTENSOR reduction
-    printf("Step 5: Summing exp values using cuTENSOR reduction...\n");
+
+   // Step 4: Sum exp values using cuTENSOR reduction
+    printf("Step 4: Summing exp values using cuTENSOR reduction...\n");
     
     // Reuse reduction operation but with SUM instead of MAX
     cutensorOperationDescriptor_t descSum;
@@ -839,35 +810,25 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
     // Execute sum reduction
     HANDLE_CUTENSOR_ERROR(cutensorReduce(cutensor_handle_, planSum,
         &alpha, output, &beta, sum_exp_d_, sum_exp_d_, workspace, workspaceSize, stream_));
+
+   
+    // Step 5a: Get sum value from GPU and compute reciprocal on host
+    printf("Step 5a: Getting sum value from GPU and computing reciprocal...\n");
     
-    // Step 6: Broadcast sum and divide using the same pattern
-    printf("Step 6: Broadcasting sum and dividing...\n");
+    // Copy sum value from device to host
+    float sum_value_h;
+    HANDLE_CUDA_ERROR(cudaMemcpyAsync(&sum_value_h, sum_exp_d_, sizeof(float), cudaMemcpyDeviceToHost, stream_));
+    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_)); // Wait for copy to complete
     
-    // Broadcast sum to full tensor
-    HANDLE_CUTENSOR_ERROR(cutensorContract(cutensor_handle_, planContract,
-        &alpha, sum_exp_d_, ones_d, &beta, temp_storage_d_, temp_storage_d_, 
-        workspaceContract, workspaceSizeContract, stream_));
+    // Compute reciprocal on host
+    float reciprocal_alpha = 1.0f / sum_value_h;
+    printf("DEBUG: sum_value = %f, reciprocal = %f\n", sum_value_h, reciprocal_alpha);
     
-    // Step 6b: Divide using cuTENSOR element-wise binary with reciprocal broadcasting
-    printf("Step 6b: Computing reciprocal and multiplying using cuTENSOR...\n");
-    
-    // Create reciprocal of sum using cuTENSOR element-wise binary: reciprocal = 1.0 / value
-    printf("Computing reciprocal using cuTENSOR element-wise division...\n");
-    
-    // Create scalar 1.0 for division
-    float* scalar_one_recip_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&scalar_one_recip_d, sizeof(float)));
-    float one_recip = 1.0f;
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(scalar_one_recip_d, &one_recip, sizeof(float), cudaMemcpyHostToDevice, stream_));
-    
-    // Use cuTENSOR unary operation with CUTENSOR_OP_RCP for reciprocal
-    printf("Computing reciprocal using cuTENSOR unary operation CUTENSOR_OP_RCP...\n");
-    
-    // Create unary operation for reciprocal: sum = 1.0 / sum
+    // Create identity permutation operation to multiply by reciprocal alpha
     cutensorOperationDescriptor_t descReciprocal;
     HANDLE_CUTENSOR_ERROR(cutensorCreatePermutation(cutensor_handle_, &descReciprocal,
-        descMax, modeScalarInt.data(), CUTENSOR_OP_RCP,     // Apply reciprocal to scalar
-        descMax, modeScalarInt.data(),                      // Output scalar
+        descMax, modeScalarInt.data(), CUTENSOR_OP_IDENTITY,  // Input scalar
+        descMax, modeScalarInt.data(),                        // Output scalar  
         descCompute));
     
     cutensorPlanPreference_t planPrefReciprocal;
@@ -884,12 +845,21 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
         HANDLE_CUDA_ERROR(cudaMalloc(&workspaceReciprocal, workspaceSizeReciprocal));
     }
     
-    // Execute reciprocal operation: sum = 1.0 / sum
-    float alpha_recip = 1.0f;
+    // Execute permutation with reciprocal as alpha: output = reciprocal_alpha * input
     HANDLE_CUTENSOR_ERROR(cutensorPermute(cutensor_handle_, planReciprocal,
-        &alpha_recip, sum_exp_d_,  // Input sum
-        sum_exp_d_,                // Output reciprocal (overwrite)
+        &reciprocal_alpha, output,  // Input sum, alpha = 1/sum
+        output,                     // Output reciprocal (overwrite)
         stream_));
+
+    // check output
+    float* output_h;
+    HANDLE_CUDA_ERROR(cudaMallocHost(&output_h, size * sizeof(float)));
+
+    HANDLE_CUDA_ERROR(cudaMemcpy(output_h, output, size * sizeof(float), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < size; i++) {
+        printf("DEBUG: output[%d] = %f\n", i, output_h[i]);
+    }
+    HANDLE_CUDA_ERROR(cudaFreeHost(output_h));
     
     // Cleanup reciprocal operation
     if (workspaceReciprocal) HANDLE_CUDA_ERROR(cudaFree(workspaceReciprocal));
@@ -897,72 +867,23 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
     HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descReciprocal));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefReciprocal));
     
-    printf("DEBUG: cuTENSOR reciprocal operation completed\n");
+    // Cleanup broadcast tensors
+    HANDLE_CUDA_ERROR(cudaFree(max_broadcast_d));
     
-    // Cleanup
-    HANDLE_CUDA_ERROR(cudaFree(scalar_one_recip_d));
-    
-    // Broadcast reciprocal sum to full tensor
-    HANDLE_CUTENSOR_ERROR(cutensorContract(cutensor_handle_, planContract,
-        &alpha, sum_exp_d_, ones_d, &beta, temp_storage_d_, temp_storage_d_, 
-        workspaceContract, workspaceSizeContract, stream_));
-    
-    // Multiply: output = output * reciprocal_sum_broadcast using cuTENSOR element-wise binary
-    cutensorOperationDescriptor_t descDivide;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseBinary(cutensor_handle_, &descDivide,
-        descInput, modeInputInt.data(), CUTENSOR_OP_IDENTITY,        // exp values
-        descMaxBroadcast, modeInputInt.data(), CUTENSOR_OP_IDENTITY, // reciprocal sum broadcast
-        descInput, modeInputInt.data(),                              // output
-        CUTENSOR_OP_MUL, descCompute));                              // Multiplication
-    
-    cutensorPlanPreference_t planPrefDivide;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefDivide, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeDivide = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descDivide, planPrefDivide, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeDivide));
-    
-    cutensorPlan_t planDivide;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planDivide, descDivide, planPrefDivide, workspaceSizeDivide));
-    
-    void* workspaceDivide = nullptr;
-    if (workspaceSizeDivide > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceDivide, workspaceSizeDivide));
-    }
-    
-    // Execute multiplication: output = 1.0 * exp_values * 1.0 * reciprocal_sum
-    float gamma_div = 1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorElementwiseBinaryExecute(cutensor_handle_, planDivide,
-        &alpha, output,           // exp values
-        &gamma_div, temp_storage_d_, // reciprocal sum broadcast
-        output,                   // output (final softmax)
-        stream_));
-    
-    // Additional cleanup for division operation
-    if (workspaceDivide) HANDLE_CUDA_ERROR(cudaFree(workspaceDivide));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planDivide));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descDivide));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefDivide));
-    
-    // Cleanup
-    HANDLE_CUDA_ERROR(cudaFree(ones_d));
+    // Cleanup workspace and other resources
     if (workspace) HANDLE_CUDA_ERROR(cudaFree(workspace));
-    if (workspaceContract) HANDLE_CUDA_ERROR(cudaFree(workspaceContract));
     if (workspaceSubtract) HANDLE_CUDA_ERROR(cudaFree(workspaceSubtract));
     
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planReduction));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planContract));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planSubtract));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planSum));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descReduction));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descContraction));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descSubtract));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descSum));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descInput));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descMax));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descOnes));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descMaxBroadcast));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPref));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefContract));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefSubtract));
     
     HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
@@ -1007,11 +928,23 @@ float NeuralNetwork::compute_cross_entropy_loss_cutensor(const float* softmax_ou
         HANDLE_CUDA_ERROR(cudaMalloc(&workspaceLog, workspaceSizeLog));
     }
     
-    // Execute log operation: temp_storage = log(softmax_output)
+    // Copy softmax output to temp storage and add epsilon to avoid log(0)
+    printf("DEBUG: Copying softmax output and adding epsilon to avoid log(0)...\n");
+    
+    // First copy softmax_output to temp_storage_d_
+    HANDLE_CUDA_ERROR(cudaMemcpyAsync(temp_storage_d_, softmax_output, size * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
+    
+    // Add epsilon to temp storage
+    float epsilon = 1e-7f;
+    dim3 blockSize(256);
+    dim3 gridSize((size + blockSize.x - 1) / blockSize.x);
+    add_epsilon_kernel<<<gridSize, blockSize, 0, stream_>>>(temp_storage_d_, size, epsilon);
+    
+    // Execute log operation: temp_storage = log(temp_storage + epsilon)
     float alpha_log = 1.0f;
     HANDLE_CUTENSOR_ERROR(cutensorPermute(cutensor_handle_, planLog,
-        &alpha_log, softmax_output,  // Input softmax
-        temp_storage_d_,             // Output log values
+        &alpha_log, temp_storage_d_,  // Input softmax with epsilon added
+        temp_storage_d_,              // Output log values (overwrite)
         stream_));
     
     // Cleanup log operation
@@ -1275,7 +1208,7 @@ float NeuralNetwork::forward(const float* input, const float* target) {
     return loss;
 }
 
-void NeuralNetwork::backward(const float* input, const float* target) {
+void NeuralNetwork::backward(const float* input, const float* target, float learning_rate) {
     printf("DEBUG: Starting neural network backward pass...\n");
     
     int final_size = layers_.back()->get_output_elements();
@@ -1318,7 +1251,7 @@ void NeuralNetwork::backward(const float* input, const float* target) {
         layers_[i]->backward(layer_input, current_gradient, dW_list[i], db_list[i], dx);
         
         // Update parameters immediately
-        layers_[i]->update_parameters(dW_list[i], db_list[i]);
+        layers_[i]->update_parameters(dW_list[i], db_list[i], learning_rate);
         
         // Set gradient for next iteration (previous layer)
         if (i > 0) {

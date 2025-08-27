@@ -1,5 +1,7 @@
 #include <iostream>
 #include <vector>
+#include <cstdio>
+#include <cstdlib>
 #include <cuda_runtime.h>
 #include "nn_utils.h"
 
@@ -11,6 +13,9 @@
 
 int main() {
     printf("Testing NeuralLayer implementation with cuTensor\n");
+    
+    // Set random seed for reproducible results
+    NeuralLayer::set_random_seed(42);
     
     // Test parameters
     const int input_size = 4;
@@ -104,10 +109,11 @@ int main() {
     
     printf("\nTesting parameter update...\n");
     
-    // Test parameter update
-    layer.update_parameters(dW_d, db_d);
+    // Test parameter update with learning rate
+    float learning_rate = 0.01f;
+    layer.update_parameters(dW_d, db_d, learning_rate);
     
-    printf("Parameters updated successfully!\n");
+    printf("Parameters updated successfully with learning rate %.3f!\n", learning_rate);
     
     // Test forward pass again to see if results changed
     layer.forward(input_d, output_d);
@@ -136,6 +142,13 @@ int main() {
     printf("==================================================\n");
     
     try {
+        // Option 1: Set fixed seed for reproducible results
+        NeuralNetwork::set_random_seed(NeuralNetwork::get_time_based_seed());
+        
+        // Option 2: Uncomment below for time-based random seed
+        // unsigned int time_seed = NeuralNetwork::get_time_based_seed();
+        // NeuralNetwork::set_random_seed(time_seed);
+        
         // Test network architecture: 4 input -> 6 hidden -> 3 output
         std::vector<int> layer_sizes = {4, 6, 3};
         
@@ -172,9 +185,11 @@ int main() {
         
         // Test training for a few iterations
         printf("\nTesting training loop...\n");
+        float training_learning_rate = 0.01f;
+        printf("Using learning rate: %.3f\n", training_learning_rate);
         for (int epoch = 0; epoch < 5; ++epoch) {
             float current_loss = network.forward(input_d, target_d);
-            network.backward(input_d, target_d);
+            network.backward(input_d, target_d, training_learning_rate);
             printf("Epoch %d: loss = %f\n", epoch + 1, current_loss);
         }
         
