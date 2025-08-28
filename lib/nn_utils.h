@@ -34,10 +34,25 @@ public:
     ~NeuralLayer();
     
     // Forward pass: y = ReLU(W * x + b) or y = W * x + b
+    // Single instance version (for backward compatibility)
     void forward(const float* input_vec, float* output_vec);
     
+    // Batch forward pass: Y = ReLU(X * W + B) or Y = X * W + B
+    // input_batch: (batch_size, input_elements)
+    // output_batch: (batch_size, output_elements)
+    void forward_batch(const float* input_batch, float* output_batch, int batch_size);
+    
     // Backward pass: compute gradients dW, db, dx given dy
+    // Single instance version (for backward compatibility)
     void backward(const float* input_vec, const float* dy, float* dW, float* db, float* dx);
+    
+    // Batch backward pass: compute gradients dW, db, dX given dY
+    // input_batch: (batch_size, input_elements)
+    // dy_batch: (batch_size, output_elements)
+    // dW: (input_elements, output_elements)
+    // db: (output_elements)
+    // dx_batch: (batch_size, input_elements)
+    void backward_batch(const float* input_batch, const float* dy_batch, float* dW, float* db, float* dx_batch, int batch_size);
     
     // Update parameters: W = W - learning_rate * dW, b = b - learning_rate * db (gradient descent)
     void update_parameters(const float* dW, const float* db, float learning_rate);
@@ -67,19 +82,34 @@ private:
     
     // cuTensor handle and descriptors
     cutensorHandle_t handle_;
+    
+    // Single instance descriptors (for backward compatibility)
     cutensorTensorDescriptor_t desc_W_;
     cutensorTensorDescriptor_t desc_x_;
     cutensorTensorDescriptor_t desc_b_;
     cutensorTensorDescriptor_t desc_z_;
     cutensorTensorDescriptor_t desc_y_;
     
-    // cuTensor operation descriptors
+    // Batch descriptors
+    cutensorTensorDescriptor_t desc_x_batch_;
+    cutensorTensorDescriptor_t desc_z_batch_;
+    cutensorTensorDescriptor_t desc_y_batch_;
+    
+    // cuTensor operation descriptors (single instance)
     cutensorOperationDescriptor_t matmul_desc_;
     cutensorPlan_t matmul_plan_;
+    
+    // cuTensor batch operation descriptors
+    cutensorOperationDescriptor_t matmul_batch_desc_;
+    cutensorPlan_t matmul_batch_plan_;
     
     // cuTensor elementwise operation descriptors for ReLU
     cutensorOperationDescriptor_t relu_desc_;
     cutensorPlan_t relu_plan_;
+    
+    // cuTensor batch elementwise operation descriptors for ReLU
+    cutensorOperationDescriptor_t relu_batch_desc_;
+    cutensorPlan_t relu_batch_plan_;
     
     // Workspace for cuTensor operations
     void* workspace_d_;
@@ -93,9 +123,17 @@ private:
     void setup_cutensor_descriptors();
     void setup_cutensor_operations();
     void setup_cutensor_elementwise_operations();
+    void setup_cutensor_batch_descriptors(int batch_size);
+    void setup_cutensor_batch_operations(int batch_size);
     void cleanup_cutensor_resources();
+    // Single instance ReLU operations
     void apply_relu_cutensor(float* input, float* output, int size);
     void apply_relu_derivative(const float* z, const float* dy, float* dz, int size);
+    
+    // Batch ReLU operations
+    void apply_relu_batch_cutensor(float* input_batch, float* output_batch, int batch_size, int size);
+    void apply_relu_batch_kernel(float* input_batch, float* output_batch, int batch_size, int size);
+    void apply_relu_derivative_batch(const float* z_batch, const float* dy_batch, float* dz_batch, int batch_size, int size);
 };
 
 class NeuralNetwork {
@@ -115,19 +153,38 @@ public:
     ~NeuralNetwork();
     
     // Forward pass: computes loss given input and target labels
+    // Single instance version (for backward compatibility)
     // input: input vector (flattened, e.g., 784 for MNIST)
     // target: one-hot encoded target vector (e.g., 10 for MNIST classes)
     // Returns: cross-entropy loss value
     float forward(const float* input, const float* target);
     
+    // Batch forward pass: computes average loss over batch
+    // input_batch: (batch_size, input_size)
+    // target_batch: (batch_size, num_classes)
+    // Returns: average cross-entropy loss over batch
+    float forward_batch(const float* input_batch, const float* target_batch, int batch_size);
+    
     // Backward pass: computes gradients and updates all layer parameters
+    // Single instance version (for backward compatibility)
     // input: same input vector used in forward pass
     // target: same target vector used in forward pass
     // learning_rate: learning rate for parameter updates
     void backward(const float* input, const float* target, float learning_rate);
     
+    // Batch backward pass: computes gradients and updates all layer parameters
+    // input_batch: same input batch used in forward pass
+    // target_batch: same target batch used in forward pass
+    // learning_rate: learning rate for parameter updates
+    void backward_batch(const float* input_batch, const float* target_batch, float learning_rate, int batch_size);
+    
     // Get prediction (index of maximum output)
+    // Single instance version
     int predict(const float* input);
+    
+    // Get predictions for batch (indices of maximum outputs)
+    // predictions: output array of size batch_size
+    void predict_batch(const float* input_batch, int* predictions, int batch_size);
     
     // Get number of layers
     int get_num_layers() const { return layers_.size(); }
@@ -183,9 +240,15 @@ private:
     void cleanup_device_memory();
     void setup_cutensor_softmax_operations();
     void cleanup_cutensor_softmax_operations();
+    // Single instance helper methods (for backward compatibility)
     void apply_softmax_cutensor(const float* input, float* output, int size);
     float compute_cross_entropy_loss_cutensor(const float* softmax_output, const float* target, int size);
     void compute_cross_entropy_gradient_cutensor(const float* softmax_output, const float* target, float* gradient, int size);
+    
+    // Batch helper methods
+    void apply_softmax_batch_cutensor(const float* input_batch, float* output_batch, int batch_size, int size);
+    float compute_cross_entropy_loss_batch_cutensor(const float* softmax_output_batch, const float* target_batch, int batch_size, int size);
+    void compute_cross_entropy_gradient_batch_cutensor(const float* softmax_output_batch, const float* target_batch, float* gradient_batch, int batch_size, int size);
 };
 
 #endif // NN_UTILS_H
