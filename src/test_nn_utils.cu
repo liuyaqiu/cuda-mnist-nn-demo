@@ -5,12 +5,6 @@
 #include <cuda_runtime.h>
 #include "nn_utils.h"
 
-#define HANDLE_CUDA_ERROR(x)                                      \
-{ const auto err = x;                                             \
-    if( err != cudaSuccess )                                        \
-    { printf("CUDA Error: %s\n", cudaGetErrorString(err)); exit(-1); } \
-};
-
 int main() {
     printf("Testing NeuralLayer implementation with cuTensor\n");
     

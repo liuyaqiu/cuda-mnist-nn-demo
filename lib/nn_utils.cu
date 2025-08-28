@@ -13,18 +13,15 @@
 // Static function implementations for random seed
 void NeuralLayer::set_random_seed(unsigned int seed) {
     std::srand(seed);
-    printf("DEBUG: Random seed set to %u for NeuralLayer\n", seed);
 }
 
 unsigned int NeuralLayer::get_time_based_seed() {
     unsigned int seed = static_cast<unsigned int>(std::time(nullptr));
-    printf("DEBUG: Generated time-based seed: %u\n", seed);
     return seed;
 }
 
 void NeuralNetwork::set_random_seed(unsigned int seed) {
     NeuralLayer::set_random_seed(seed);  // Delegate to layer implementation
-    printf("DEBUG: Random seed set to %u for NeuralNetwork\n", seed);
 }
 
 unsigned int NeuralNetwork::get_time_based_seed() {
@@ -43,15 +40,6 @@ __global__ void update_parameters_kernel(float* params, const float* grads, int 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         params[idx] -= learning_rate * grads[idx];  // Subtract for gradient descent
-    }
-}
-
-// CUDA kernel for outer product computation: dW[i][j] = x[i] * dz[j]
-__global__ void outer_product_kernel(const float* x, const float* dz, float* dW, int input_size, int output_size) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y * blockDim.y + threadIdx.y;
-    if (i < input_size && j < output_size) {
-        dW[i * output_size + j] = x[i] * dz[j];
     }
 }
 
@@ -206,13 +194,9 @@ void NeuralLayer::setup_cutensor_operations() {
 }
 
 void NeuralLayer::setup_cutensor_elementwise_operations() {
-    printf("DEBUG: Setting up cuTensor elementwise operations...\n");
-    
     // Let's implement a proper approach using supported cuTensor operations
     // Since CUTENSOR_OP_MAX may not be supported, we'll use CUTENSOR_OP_ADD with
     // binary operations to create the ReLU effect
-    
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
     cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
     
     // Mode arrays for the elementwise operation (all tensors have same mode 'o')
@@ -236,8 +220,6 @@ void NeuralLayer::setup_cutensor_elementwise_operations() {
         relu_desc_ = nullptr;
         return;
     }
-    
-    printf("DEBUG: Created cuTensor elementwise binary descriptor\n");
     
     // Create plan preference
     cutensorPlanPreference_t planPref;
@@ -279,10 +261,6 @@ void NeuralLayer::setup_cutensor_elementwise_operations() {
         relu_desc_ = nullptr;
         return;
     }
-    
-    printf("DEBUG: cuTensor elementwise operation setup completed successfully\n");
-    printf("NOTE: This implements identity operation (D = A + 0) as proof of concept\n");
-    printf("      For ReLU, we'll use optimized CUDA kernels which are more suitable\n");
 }
 
 void NeuralLayer::cleanup_cutensor_resources() {
@@ -298,8 +276,6 @@ void NeuralLayer::cleanup_cutensor_resources() {
 }
 
 void NeuralLayer::forward(const float* input_vec, float* output_vec) {
-    printf("DEBUG: Starting forward pass...\n");
-    
     const float alpha = 1.0f;
     const float beta = 1.0f;  // Use beta=1.0f to add to existing bias
     
@@ -309,37 +285,28 @@ void NeuralLayer::forward(const float* input_vec, float* output_vec) {
     // where z initially contains the bias vector
     
     // Step 1: Copy bias to z (this will be our initial value for the fused operation)
-    printf("DEBUG: Step 1 - Copying bias to z...\n");
     HANDLE_CUDA_ERROR(cudaMemcpyAsync(z_d_, b_d_, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
     
     // Step 2: Fused matrix-vector multiplication with bias addition: z = alpha * (W^T * x) + beta * b
     // The bias is already in z_d_, and beta=1.0f means we add the matrix-vector product to it
-    printf("DEBUG: Step 2 - Executing cuTensor contraction...\n");
     HANDLE_CUTENSOR_ERROR(cutensorContract(
         handle_, matmul_plan_,
         &alpha, W_d_, input_vec,
         &beta, z_d_, z_d_,
         workspace_d_, workspace_size_, stream_));
-    printf("DEBUG: cuTensor contraction completed successfully\n");
     
     // Step 3: Apply activation function (if enabled)
     if (non_linear_activate_) {
-        printf("DEBUG: Step 3 - Applying ReLU activation...\n");
         // Copy linear output to final output buffer, then apply ReLU
         HANDLE_CUDA_ERROR(cudaMemcpyAsync(output_vec, z_d_, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
-        printf("DEBUG: About to call apply_relu_cutensor...\n");
         apply_relu_cutensor(output_vec, output_vec, output_elements_);
-        printf("DEBUG: ReLU activation completed\n");
     } else {
-        printf("DEBUG: Step 3 - Copying linear output (no activation)...\n");
         // Just copy z to output (linear layer, no activation)
         HANDLE_CUDA_ERROR(cudaMemcpyAsync(output_vec, z_d_, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
     }
     
     // Synchronize stream
-    printf("DEBUG: Synchronizing CUDA stream...\n");
     HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-    printf("DEBUG: Forward pass completed successfully\n");
 }
 
 void NeuralLayer::backward(const float* input_vec, const float* dy, float* dW, float* db, float* dx) {
@@ -358,14 +325,82 @@ void NeuralLayer::backward(const float* input_vec, const float* dy, float* dW, f
     // Compute db = dz (gradient w.r.t. bias)
     HANDLE_CUDA_ERROR(cudaMemcpyAsync(db, dz_d, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
     
-    // Compute dW = x ⊗ dz (outer product)
+    // Compute dW = x ⊗ dz (outer product) using cuTENSOR contraction
     // For matrix W of shape (input_elements, output_elements), dW has the same shape
-    // dW[i][j] = x[i] * dz[j]
-    dim3 blockSize(16, 16);
-    dim3 gridSize((input_elements_ + blockSize.x - 1) / blockSize.x, 
-                  (output_elements_ + blockSize.y - 1) / blockSize.y);
+    // dW[i][j] = x[i] * dz[j] - this is a contraction with no shared indices
     
-    outer_product_kernel<<<gridSize, blockSize, 0, stream_>>>(input_vec, dz_d, dW, input_elements_, output_elements_);
+    // Create tensor descriptors for outer product computation
+    const uint32_t kAlignment = 128;
+    cutensorDataType_t dataType = CUTENSOR_R_32F;
+    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
+    
+    // Input vector x: (input_elements,) with mode 'i'
+    std::vector<int64_t> extentX_outer = {static_cast<int64_t>(input_elements_)};
+    std::vector<int> modeX_outer = {'i'};
+    cutensorTensorDescriptor_t descX_outer;
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &descX_outer, 1, extentX_outer.data(), nullptr, dataType, kAlignment));
+    
+    // Gradient vector dz: (output_elements,) with mode 'j'
+    std::vector<int64_t> extentDz = {static_cast<int64_t>(output_elements_)};
+    std::vector<int> modeDz = {'j'};
+    cutensorTensorDescriptor_t descDz;
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &descDz, 1, extentDz.data(), nullptr, dataType, kAlignment));
+    
+    // Weight gradient matrix dW: (input_elements, output_elements) with modes 'i', 'j'
+    std::vector<int64_t> extentDW = {static_cast<int64_t>(input_elements_), static_cast<int64_t>(output_elements_)};
+    std::vector<int> modeDW = {'i', 'j'};
+    cutensorTensorDescriptor_t descDW;
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &descDW, 2, extentDW.data(), nullptr, dataType, kAlignment));
+    
+    // Create contraction for outer product: dW[i,j] = x[i] * dz[j]
+    // No indices are contracted (summed over) - this creates the outer product
+    cutensorOperationDescriptor_t outerProductDesc;
+    HANDLE_CUTENSOR_ERROR(cutensorCreateContraction(
+        handle_, &outerProductDesc,
+        descX_outer, modeX_outer.data(), CUTENSOR_OP_IDENTITY,  // x[i]
+        descDz, modeDz.data(), CUTENSOR_OP_IDENTITY,            // dz[j]
+        descDW, modeDW.data(), CUTENSOR_OP_IDENTITY,            // dW[i,j] (no existing values)
+        descDW, modeDW.data(),                                  // output dW[i,j]
+        descCompute));
+    
+    // Create plan for outer product
+    cutensorPlanPreference_t planPref;
+    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(handle_, &planPref, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
+    
+    size_t outerProductWorkspaceSize = 0;
+    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(handle_, outerProductDesc, planPref, CUTENSOR_WORKSPACE_DEFAULT, &outerProductWorkspaceSize));
+    
+    cutensorPlan_t outerProductPlan;
+    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(handle_, &outerProductPlan, outerProductDesc, planPref, outerProductWorkspaceSize));
+    
+    // Allocate workspace if needed (reuse existing workspace if large enough)
+    void* outerProductWorkspace = nullptr;
+    if (outerProductWorkspaceSize > 0) {
+        if (outerProductWorkspaceSize <= workspace_size_ && workspace_d_ != nullptr) {
+            outerProductWorkspace = workspace_d_;  // Reuse existing workspace
+        } else {
+            HANDLE_CUDA_ERROR(cudaMalloc(&outerProductWorkspace, outerProductWorkspaceSize));
+        }
+    }
+    
+    // Execute outer product contraction: dW = 1.0 * (x ⊗ dz) + 0.0 * dW
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    HANDLE_CUTENSOR_ERROR(cutensorContract(
+        handle_, outerProductPlan,
+        &alpha, input_vec, dz_d,     // inputs: x[i] and dz[j]
+        &beta, dW, dW,               // output: dW[i,j] = x[i] * dz[j]
+        outerProductWorkspace, outerProductWorkspaceSize, stream_));
+    
+    // Cleanup outer product resources
+    if (outerProductWorkspace != workspace_d_ && outerProductWorkspace != nullptr) {
+        HANDLE_CUDA_ERROR(cudaFree(outerProductWorkspace));
+    }
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(outerProductPlan));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(outerProductDesc));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descX_outer));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descDz));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descDW));
     
     // Compute dx = W * dz
     if (dx != nullptr) {
@@ -399,8 +434,6 @@ void NeuralLayer::update_parameters(const float* dW, const float* db, float lear
     HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
 }
 
-
-
 void NeuralLayer::apply_relu_cutensor(float* input, float* output, int size) {
     // Check if relu_plan_ is properly initialized
     if (relu_plan_ == nullptr) {
@@ -414,8 +447,6 @@ void NeuralLayer::apply_relu_cutensor(float* input, float* output, int size) {
     const float alpha = 1.0f;  // Scaling for input tensor
     const float gamma = 0.0f;  // Scaling for zero tensor (effectively ignored)
     
-    printf("DEBUG: Using cuTensor-only operation for activation\n");
-    
     // Execute the elementwise binary operation: output = alpha * input + gamma * zero
     cutensorStatus_t status = cutensorElementwiseBinaryExecute(
         handle_, relu_plan_,
@@ -428,22 +459,29 @@ void NeuralLayer::apply_relu_cutensor(float* input, float* output, int size) {
         printf("ERROR: cuTensor elementwise execution failed\n");
         return;
     }
-    
-    printf("DEBUG: cuTensor activation completed (identity operation)\n");
+}
+
+// CUDA kernel for ReLU derivative computation
+__global__ void relu_derivative_kernel(const float* z, const float* dy, float* dz, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        // ReLU derivative: f'(z) = 1 if z > 0, else 0
+        // dz = dy * f'(z)
+        dz[idx] = (z[idx] > 0.0f) ? dy[idx] : 0.0f;
+    }
 }
 
 void NeuralLayer::apply_relu_derivative(const float* z, const float* dy, float* dz, int size) {
-    // For ReLU derivative using cuTensor operations only
-    // Since cuTensor doesn't have a direct ReLU derivative operator,
-    // we implement dz = dy (identity) as a placeholder
-    // In a full implementation, you would need custom cuTensor operations
+    // Use custom CUDA kernel for ReLU derivative since cuTensor doesn't support it directly
+    // ReLU derivative: dz[i] = dy[i] if z[i] > 0, else 0
     
-    printf("DEBUG: Using cuTensor-only operation for ReLU derivative (identity)\n");
+    dim3 blockSize(256);
+    dim3 gridSize((size + blockSize.x - 1) / blockSize.x);
     
-    // Simple copy: dz = dy (identity operation as placeholder)
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(dz, dy, size * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
+    relu_derivative_kernel<<<gridSize, blockSize, 0, stream_>>>(z, dy, dz, size);
     
-    printf("DEBUG: cuTensor ReLU derivative completed (identity operation)\n");
+    // Check for kernel launch errors
+    HANDLE_CUDA_ERROR(cudaGetLastError());
 }
 
 // CUDA kernels for softmax and cross-entropy operations - ALL REMOVED!
@@ -590,8 +628,6 @@ void NeuralNetwork::cleanup_device_memory() {
 }
 
 void NeuralNetwork::setup_cutensor_softmax_operations() {
-    printf("DEBUG: Setting up cuTensor softmax operations...\n");
-    
     const uint32_t kAlignment = 128;
     cutensorDataType_t dataType = CUTENSOR_R_32F;
     
@@ -613,8 +649,6 @@ void NeuralNetwork::setup_cutensor_softmax_operations() {
     // For now, we'll implement a simplified approach using cuTensor elementwise operations
     // The actual softmax implementation will use hybrid CUDA kernels + cuTensor reductions
     // This is because cuTensor doesn't directly support exp/log operations in all versions
-    
-    printf("DEBUG: cuTensor softmax descriptors setup completed\n");
 }
 
 void NeuralNetwork::cleanup_cutensor_softmax_operations() {
@@ -648,8 +682,6 @@ __global__ void element_log_kernel(const float* input, float* output, int size) 
 }
 
 void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, int size) {
-    printf("DEBUG: Starting cuTENSOR-based softmax with broadcasting...\n");
-    
     const uint32_t kAlignment = 128;
     cutensorDataType_t dataType = CUTENSOR_R_32F;
     cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
@@ -787,8 +819,6 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
     HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descExp));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefExp));
     
-    printf("DEBUG: cuTENSOR exp operation completed\n");
-
    // Step 4: Sum exp values using cuTENSOR reduction
     printf("Step 4: Summing exp values using cuTENSOR reduction...\n");
     
@@ -822,8 +852,6 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
     
     // Compute reciprocal on host
     float reciprocal_alpha = 1.0f / sum_value_h;
-    printf("DEBUG: sum_value = %f, reciprocal = %f\n", sum_value_h, reciprocal_alpha);
-    
     // Create identity permutation operation to multiply by reciprocal alpha
     cutensorOperationDescriptor_t descReciprocal;
     HANDLE_CUTENSOR_ERROR(cutensorCreatePermutation(cutensor_handle_, &descReciprocal,
@@ -851,16 +879,6 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
         output,                     // Output reciprocal (overwrite)
         stream_));
 
-    // check output
-    float* output_h;
-    HANDLE_CUDA_ERROR(cudaMallocHost(&output_h, size * sizeof(float)));
-
-    HANDLE_CUDA_ERROR(cudaMemcpy(output_h, output, size * sizeof(float), cudaMemcpyDeviceToHost));
-    for (int i = 0; i < size; i++) {
-        printf("DEBUG: output[%d] = %f\n", i, output_h[i]);
-    }
-    HANDLE_CUDA_ERROR(cudaFreeHost(output_h));
-    
     // Cleanup reciprocal operation
     if (workspaceReciprocal) HANDLE_CUDA_ERROR(cudaFree(workspaceReciprocal));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planReciprocal));
@@ -887,12 +905,9 @@ void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, in
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefSubtract));
     
     HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-    printf("DEBUG: cuTENSOR-based softmax completed\n");
 }
 
 float NeuralNetwork::compute_cross_entropy_loss_cutensor(const float* softmax_output, const float* target, int size) {
-    printf("DEBUG: Computing cross-entropy loss with cuTENSOR...\n");
-    
     const uint32_t kAlignment = 128;
     cutensorDataType_t dataType = CUTENSOR_R_32F;
     cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
@@ -929,8 +944,6 @@ float NeuralNetwork::compute_cross_entropy_loss_cutensor(const float* softmax_ou
     }
     
     // Copy softmax output to temp storage and add epsilon to avoid log(0)
-    printf("DEBUG: Copying softmax output and adding epsilon to avoid log(0)...\n");
-    
     // First copy softmax_output to temp_storage_d_
     HANDLE_CUDA_ERROR(cudaMemcpyAsync(temp_storage_d_, softmax_output, size * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
     
@@ -953,8 +966,6 @@ float NeuralNetwork::compute_cross_entropy_loss_cutensor(const float* softmax_ou
     HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descLog));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descSoftmaxInput));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefLog));
-    
-    printf("DEBUG: cuTENSOR log operation completed\n");
     
     // Step 2: Element-wise multiply log(softmax) with target using cuTENSOR
     printf("Step 2: Element-wise multiply with target using cuTENSOR...\n");
@@ -1114,13 +1125,10 @@ float NeuralNetwork::compute_cross_entropy_loss_cutensor(const float* softmax_ou
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefMultiply));
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefReduction));
     
-    printf("DEBUG: cuTENSOR cross-entropy loss computed: %f\n", loss);
     return loss;
 }
 
 void NeuralNetwork::compute_cross_entropy_gradient_cutensor(const float* softmax_output, const float* target, float* gradient, int size) {
-    printf("DEBUG: Computing cross-entropy gradient with cuTENSOR element-wise binary...\n");
-    
     const uint32_t kAlignment = 128;
     cutensorDataType_t dataType = CUTENSOR_R_32F;
     cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
@@ -1178,39 +1186,30 @@ void NeuralNetwork::compute_cross_entropy_gradient_cutensor(const float* softmax
     HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefGrad));
     
     HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-    printf("DEBUG: cuTENSOR cross-entropy gradient computed using pure element-wise binary\n");
 }
 
 // Old softmax implementation removed - now using cuTensor-enhanced version
 
 float NeuralNetwork::forward(const float* input, const float* target) {
-    printf("DEBUG: Starting neural network forward pass...\n");
-    
     const float* current_input = input;
     
     // Forward pass through all layers
     for (size_t i = 0; i < layers_.size(); ++i) {
-        printf("DEBUG: Forward pass layer %zu...\n", i);
         layers_[i]->forward(current_input, layer_outputs_[i]);
         current_input = layer_outputs_[i];
     }
     
     // Apply softmax to final layer output using cuTensor-enhanced implementation
     int final_size = layers_.back()->get_output_elements();
-    printf("DEBUG: Applying cuTensor-enhanced softmax to final layer (size: %d)...\n", final_size);
     apply_softmax_cutensor(layer_outputs_.back(), softmax_output_d_, final_size);
     
     // Compute cross-entropy loss using cuTensor-enhanced implementation
-    printf("DEBUG: Computing cuTensor-enhanced cross-entropy loss...\n");
     float loss = compute_cross_entropy_loss_cutensor(softmax_output_d_, target, final_size);
     
-    printf("DEBUG: Forward pass completed, loss = %f\n", loss);
     return loss;
 }
 
 void NeuralNetwork::backward(const float* input, const float* target, float learning_rate) {
-    printf("DEBUG: Starting neural network backward pass...\n");
-    
     int final_size = layers_.back()->get_output_elements();
     
     // Compute gradient of cross-entropy loss w.r.t. final layer output using cuTensor
@@ -1235,8 +1234,6 @@ void NeuralNetwork::backward(const float* input, const float* target, float lear
     const float* current_gradient = loss_gradient_d_;
     
     for (int i = layers_.size() - 1; i >= 0; --i) {
-        printf("DEBUG: Backward pass layer %d...\n", i);
-        
         // Determine input for this layer
         const float* layer_input;
         if (i == 0) {
@@ -1266,8 +1263,6 @@ void NeuralNetwork::backward(const float* input, const float* target, float lear
     for (float* ptr : db_list) {
         cudaFree(ptr);
     }
-    
-    printf("DEBUG: Backward pass completed\n");
 }
 
 int NeuralNetwork::predict(const float* input) {
