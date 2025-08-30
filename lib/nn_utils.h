@@ -19,6 +19,18 @@
     { printf("CUDA Error in %s at %s:%d: %s\n", __func__, __FILE__, __LINE__, cudaGetErrorString(err)); exit(-1); } \
 };
 
+/*
+Important instructions:
+    1. All deveice and host memory are stored as column major order tensor, such as (batch_size, input_elements)
+    2. If it's possible, we should use CUDA managed memory to avoid manual memory allocation and deallocation.
+    3. If it's possible, we should use cuTENSOR to calculate tensor permute(unary), element-wise(binary), and reduction(ternary) operations.
+    4. When cuTENSOR doesn't have native support for a certain operation, such as add scalar or low dimension tensor to a tensor(which needs broadcast),
+       we should use kernel function to implement it.
+    5. We should add some important assertions to check the correctness of some operations, for example the sum of softmax logtis should be 1.
+    6. We need to consider add unit test for some important implementations, such as softmax, cross-entropy, and ReLU.
+*/
+
+
 class NeuralLayer {
 public:
     // Static function to set random seed for weight initialization
@@ -33,18 +45,10 @@ public:
     // Destructor
     ~NeuralLayer();
     
-    // Forward pass: y = ReLU(W * x + b) or y = W * x + b
-    // Single instance version (for backward compatibility)
-    void forward(const float* input_vec, float* output_vec);
-    
     // Batch forward pass: Y = ReLU(X * W + B) or Y = X * W + B
     // input_batch: (batch_size, input_elements)
     // output_batch: (batch_size, output_elements)
     void forward_batch(const float* input_batch, float* output_batch, int batch_size);
-    
-    // Backward pass: compute gradients dW, db, dx given dy
-    // Single instance version (for backward compatibility)
-    void backward(const float* input_vec, const float* dy, float* dW, float* db, float* dx);
     
     // Batch backward pass: compute gradients dW, db, dX given dY
     // input_batch: (batch_size, input_elements)
@@ -55,7 +59,10 @@ public:
     void backward_batch(const float* input_batch, const float* dy_batch, float* dW, float* db, float* dx_batch, int batch_size);
     
     // Update parameters: W = W - learning_rate * dW, b = b - learning_rate * db (gradient descent)
-    void update_parameters(const float* dW, const float* db, float learning_rate);
+    // max_gradient_norm: maximum allowed gradient norm (default 5.0 for stability)
+    // weight_decay: L2 regularization coefficient (default 0.0)
+    void update_parameters(const float* dW, const float* db, float learning_rate, 
+                          float max_gradient_norm = 5.0f, float weight_decay = 0.0f);
     
     // Getters
     int get_input_elements() const { return input_elements_; }
@@ -79,62 +86,75 @@ private:
     // Device memory for intermediate computations
     float* z_d_;  // linear output before activation: W * x + b
     float* zero_d_; // zero tensor for ReLU operation (max(x, 0))
-    
-    // cuTensor handle and descriptors
-    cutensorHandle_t handle_;
-    
-    // Single instance descriptors (for backward compatibility)
-    cutensorTensorDescriptor_t desc_W_;
-    cutensorTensorDescriptor_t desc_x_;
-    cutensorTensorDescriptor_t desc_b_;
-    cutensorTensorDescriptor_t desc_z_;
-    cutensorTensorDescriptor_t desc_y_;
-    
-    // Batch descriptors
-    cutensorTensorDescriptor_t desc_x_batch_;
-    cutensorTensorDescriptor_t desc_z_batch_;
-    cutensorTensorDescriptor_t desc_y_batch_;
-    
-    // cuTensor operation descriptors (single instance)
-    cutensorOperationDescriptor_t matmul_desc_;
-    cutensorPlan_t matmul_plan_;
-    
-    // cuTensor batch operation descriptors
-    cutensorOperationDescriptor_t matmul_batch_desc_;
-    cutensorPlan_t matmul_batch_plan_;
-    
-    // cuTensor elementwise operation descriptors for ReLU
-    cutensorOperationDescriptor_t relu_desc_;
-    cutensorPlan_t relu_plan_;
-    
-    // cuTensor batch elementwise operation descriptors for ReLU
-    cutensorOperationDescriptor_t relu_batch_desc_;
-    cutensorPlan_t relu_batch_plan_;
-    
-    // Workspace for cuTensor operations
-    void* workspace_d_;
-    size_t workspace_size_;
-    
-    // CUDA stream
-    cudaStream_t stream_;
-    
-    // Helper methods
-    void initialize_weights_and_biases();
-    void setup_cutensor_descriptors();
-    void setup_cutensor_operations();
-    void setup_cutensor_elementwise_operations();
-    void setup_cutensor_batch_descriptors(int batch_size);
-    void setup_cutensor_batch_operations(int batch_size);
-    void cleanup_cutensor_resources();
-    // Single instance ReLU operations
-    void apply_relu_cutensor(float* input, float* output, int size);
-    void apply_relu_derivative(const float* z, const float* dy, float* dz, int size);
+    size_t zero_size_; // size of allocated zero tensor
     
     // Batch ReLU operations
-    void apply_relu_batch_cutensor(float* input_batch, float* output_batch, int batch_size, int size);
-    void apply_relu_batch_kernel(float* input_batch, float* output_batch, int batch_size, int size);
+    void apply_relu_batch_cutensor(cutensorHandle_t &handle, float* input_batch, float* output_batch, int batch_size, int size);
     void apply_relu_derivative_batch(const float* z_batch, const float* dy_batch, float* dz_batch, int batch_size, int size);
 };
+
+//=============================================================================
+// cuTENSOR Helper Function Declarations
+//=============================================================================
+
+// General tensor contraction wrapper using cuTENSOR
+// Performs: C = alpha * A * B + beta * C
+// Users specify tensor extents and modes (labels) for each tensor
+// Contracted dimensions should have the same mode labels
+// Example: Matrix multiplication C[i,j] = sum_k A[i,k] * B[k,j]
+//          extentA = {m, k}, extentB = {k, n}, extentC = {m, n}
+//          modeA = {'i', 'k'}, modeB = {'k', 'j'}, modeC = {'i', 'j'}
+void cutensor_contraction_wrapper(cutensorHandle_t &cutensor_handle,
+                                 const float* A, const float* B, float* C,
+                                 const std::vector<int64_t>& extentA,
+                                 const std::vector<int64_t>& extentB,
+                                 const std::vector<int64_t>& extentC,
+                                 const std::vector<int32_t>& modeA,
+                                 const std::vector<int32_t>& modeB,
+                                 const std::vector<int32_t>& modeC,
+                                 cudaStream_t stream = 0);
+
+// General tensor reduction wrapper using cuTENSOR
+// Performs: D = alpha * reduce_op(A) + beta * D
+// Reduces tensor A along specified modes to produce tensor D
+// Example: Sum reduction D[i,j] = sum_k A[i,j,k]
+//          extentA = {m, n, k}, extentD = {m, n}
+//          modeA = {'i', 'j', 'k'}, modeD = {'i', 'j'}
+//          opReduce = CUTENSOR_OP_ADD
+void cutensor_reduction_wrapper(cutensorHandle_t &cutensor_handle,
+                               const float* A, float* D,
+                               const std::vector<int64_t>& extentA,
+                               const std::vector<int64_t>& extentD,
+                               const std::vector<int32_t>& modeA,
+                               const std::vector<int32_t>& modeD,
+                               cutensorOperator_t opReduce,
+                               float alpha = 1.0f,
+                               float beta = 0.0f,
+                               cudaStream_t stream = 0);
+
+// General element-wise trinary operation wrapper using cuTENSOR
+// Performs: D = op_ABC(op_AB(alpha * op_A(A), beta * op_B(B)), gamma * op_C(C))
+// Supports broadcasting: modes can be omitted from A, B, or C for broadcasting
+// This is more flexible than binary for complex operations
+void cutensor_elementwise_trinary_wrapper(cutensorHandle_t &cutensor_handle,
+                                         const float* A, const float* B, const float* C, float* D,
+                                         const std::vector<int64_t>& extentA,
+                                         const std::vector<int64_t>& extentB,
+                                         const std::vector<int64_t>& extentC,
+                                         const std::vector<int64_t>& extentD,
+                                         const std::vector<int32_t>& modeA,
+                                         const std::vector<int32_t>& modeB,
+                                         const std::vector<int32_t>& modeC,
+                                         const std::vector<int32_t>& modeD,
+                                         cutensorOperator_t opA,
+                                         cutensorOperator_t opB,
+                                         cutensorOperator_t opC,
+                                         cutensorOperator_t opAB,
+                                         cutensorOperator_t opABC,
+                                         float alpha = 1.0f,
+                                         float beta = 1.0f,
+                                         float gamma = 1.0f,
+                                         cudaStream_t stream = 0);
 
 class NeuralNetwork {
 public:
@@ -152,35 +172,21 @@ public:
     // Destructor
     ~NeuralNetwork();
     
-    // Forward pass: computes loss given input and target labels
-    // Single instance version (for backward compatibility)
-    // input: input vector (flattened, e.g., 784 for MNIST)
-    // target: one-hot encoded target vector (e.g., 10 for MNIST classes)
-    // Returns: cross-entropy loss value
-    float forward(const float* input, const float* target);
-    
     // Batch forward pass: computes average loss over batch
     // input_batch: (batch_size, input_size)
     // target_batch: (batch_size, num_classes)
     // Returns: average cross-entropy loss over batch
     float forward_batch(const float* input_batch, const float* target_batch, int batch_size);
     
-    // Backward pass: computes gradients and updates all layer parameters
-    // Single instance version (for backward compatibility)
-    // input: same input vector used in forward pass
-    // target: same target vector used in forward pass
-    // learning_rate: learning rate for parameter updates
-    void backward(const float* input, const float* target, float learning_rate);
-    
     // Batch backward pass: computes gradients and updates all layer parameters
     // input_batch: same input batch used in forward pass
     // target_batch: same target batch used in forward pass
     // learning_rate: learning rate for parameter updates
-    void backward_batch(const float* input_batch, const float* target_batch, float learning_rate, int batch_size);
-    
-    // Get prediction (index of maximum output)
-    // Single instance version
-    int predict(const float* input);
+    // max_gradient_norm: maximum allowed gradient norm (default 5.0 for stability)
+    // weight_decay: L2 regularization coefficient (default 0.0)
+    void backward_batch(const float* input_batch, const float* target_batch, 
+                       float learning_rate, int batch_size,
+                       float max_gradient_norm = 5.0f, float weight_decay = 0.0f);
     
     // Get predictions for batch (indices of maximum outputs)
     // predictions: output array of size batch_size
@@ -188,67 +194,14 @@ public:
     
     // Get number of layers
     int get_num_layers() const { return layers_.size(); }
-    
-    // Get layer at index
+
+   // Get layer at index
     const NeuralLayer* get_layer(int index) const { return layers_[index]; }
 
 private:
     std::vector<NeuralLayer*> layers_;
     std::vector<float*> layer_outputs_;  // Device memory for intermediate outputs
     std::vector<float*> layer_gradients_; // Device memory for gradients
-    
-    // Device memory for final softmax output and loss computation
-    float* softmax_output_d_;
-    float* loss_gradient_d_;
-    float* temp_storage_d_;     // Temporary storage for intermediate computations
-    float* max_values_d_;       // For storing max values in softmax
-    float* sum_exp_d_;          // For storing sum of exponentials
-    
-    // CUDA stream
-    cudaStream_t stream_;
-    
-    // cuTensor handle and descriptors for softmax/loss operations
-    cutensorHandle_t cutensor_handle_;
-    cutensorTensorDescriptor_t softmax_input_desc_;
-    cutensorTensorDescriptor_t softmax_output_desc_;
-    cutensorTensorDescriptor_t target_desc_;
-    
-    // cuTensor operation descriptors for softmax components
-    cutensorOperationDescriptor_t exp_desc_;          // For exponential operation
-    cutensorOperationDescriptor_t log_desc_;          // For logarithm operation
-    cutensorOperationDescriptor_t sub_desc_;          // For subtraction operation
-    cutensorOperationDescriptor_t div_desc_;          // For division operation
-    cutensorOperationDescriptor_t mul_desc_;          // For multiplication operation
-    cutensorOperationDescriptor_t reduce_max_desc_;   // For max reduction
-    cutensorOperationDescriptor_t reduce_sum_desc_;   // For sum reduction
-    
-    // cuTensor plans
-    cutensorPlan_t exp_plan_;
-    cutensorPlan_t log_plan_;
-    cutensorPlan_t sub_plan_;
-    cutensorPlan_t div_plan_;
-    cutensorPlan_t mul_plan_;
-    cutensorPlan_t reduce_max_plan_;
-    cutensorPlan_t reduce_sum_plan_;
-    
-    // Workspace for cuTensor operations
-    void* cutensor_workspace_d_;
-    size_t cutensor_workspace_size_;
-    
-    // Helper methods
-    void setup_device_memory();
-    void cleanup_device_memory();
-    void setup_cutensor_softmax_operations();
-    void cleanup_cutensor_softmax_operations();
-    // Single instance helper methods (for backward compatibility)
-    void apply_softmax_cutensor(const float* input, float* output, int size);
-    float compute_cross_entropy_loss_cutensor(const float* softmax_output, const float* target, int size);
-    void compute_cross_entropy_gradient_cutensor(const float* softmax_output, const float* target, float* gradient, int size);
-    
-    // Batch helper methods
-    void apply_softmax_batch_cutensor(const float* input_batch, float* output_batch, int batch_size, int size);
-    float compute_cross_entropy_loss_batch_cutensor(const float* softmax_output_batch, const float* target_batch, int batch_size, int size);
-    void compute_cross_entropy_gradient_batch_cutensor(const float* softmax_output_batch, const float* target_batch, float* gradient_batch, int batch_size, int size);
 };
 
 #endif // NN_UTILS_H

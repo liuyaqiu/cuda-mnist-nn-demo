@@ -1,2378 +1,1611 @@
 #include "nn_utils.h"
-#include <cstdlib>
+#include <curand_kernel.h>
+#include <cassert>
 #include <cmath>
+#include <stdexcept>
+#include <cstdio>
 #include <cstring>
-#include <vector>
 #include <algorithm>
-#include <cstdint>
-#include <limits>
-#include <ctime>
 
-// Note: ReLU activation and derivative are now handled by cuTensor operations only
+//=============================================================================
+// CUDA Kernels for Neural Layer Operations
+//=============================================================================
 
-// Static function implementations for random seed
-void NeuralLayer::set_random_seed(unsigned int seed) {
-    std::srand(seed);
-}
-
-unsigned int NeuralLayer::get_time_based_seed() {
-    unsigned int seed = static_cast<unsigned int>(std::time(nullptr));
-    return seed;
-}
-
-void NeuralNetwork::set_random_seed(unsigned int seed) {
-    NeuralLayer::set_random_seed(seed);  // Delegate to layer implementation
-}
-
-unsigned int NeuralNetwork::get_time_based_seed() {
-    return NeuralLayer::get_time_based_seed();  // Delegate to layer implementation
-}
-
-// CUDA kernel for adding epsilon to softmax_output
-__global__ void add_epsilon_kernel(float* data, int size, float epsilon) {
+// Kernel for initializing weights using Xavier/He initialization
+__global__ void init_weights_kernel(float* weights, int size, float scale, unsigned int seed) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        data[idx] += epsilon;
-    }
-}
-// CUDA kernel for parameter update with learning rate
-__global__ void update_parameters_kernel(float* params, const float* grads, int size, float learning_rate) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        params[idx] -= learning_rate * grads[idx];  // Subtract for gradient descent
+        curandState state;
+        curand_init(seed, idx, 0, &state);
+        weights[idx] = curand_normal(&state) * scale;
     }
 }
 
-// CUDA kernel to fill tensor with a scalar value
-__global__ void fill_tensor_kernel(float* data, float value, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        data[idx] = value;
-    }
-}
-
-NeuralLayer::NeuralLayer(int input_elements, int output_elements, bool non_linear_activate)
-    : input_elements_(input_elements), output_elements_(output_elements), non_linear_activate_(non_linear_activate),
-      W_d_(nullptr), b_d_(nullptr), z_d_(nullptr), zero_d_(nullptr), workspace_d_(nullptr), workspace_size_(0),
-      relu_desc_(nullptr), relu_plan_(nullptr), relu_batch_desc_(nullptr), relu_batch_plan_(nullptr),
-      matmul_batch_desc_(nullptr), matmul_batch_plan_(nullptr) {
-    
-    // Create CUDA stream
-    HANDLE_CUDA_ERROR(cudaStreamCreate(&stream_));
-    
-    // Initialize cuTensor handle
-    HANDLE_CUTENSOR_ERROR(cutensorCreate(&handle_));
-    
-    // Allocate device memory
-    HANDLE_CUDA_ERROR(cudaMalloc(&W_d_, input_elements_ * output_elements_ * sizeof(float)));
-    HANDLE_CUDA_ERROR(cudaMalloc(&b_d_, output_elements_ * sizeof(float)));
-    HANDLE_CUDA_ERROR(cudaMalloc(&z_d_, output_elements_ * sizeof(float)));
-    HANDLE_CUDA_ERROR(cudaMalloc(&zero_d_, output_elements_ * sizeof(float)));
-    
-    // Initialize zero tensor
-    HANDLE_CUDA_ERROR(cudaMemset(zero_d_, 0, output_elements_ * sizeof(float)));
-    
-    // Initialize weights and biases
-    initialize_weights_and_biases();
-    
-    // Setup cuTensor descriptors and operations
-    setup_cutensor_descriptors();
-    setup_cutensor_operations();
-    setup_cutensor_elementwise_operations();
-}
-
-NeuralLayer::~NeuralLayer() {
-    // Cleanup cuTensor resources
-    cleanup_cutensor_resources();
-    
-    // Free device memory
-    if (W_d_) cudaFree(W_d_);
-    if (b_d_) cudaFree(b_d_);
-    if (z_d_) cudaFree(z_d_);
-    if (zero_d_) cudaFree(zero_d_);
-    if (workspace_d_) cudaFree(workspace_d_);
-    
-    // Destroy CUDA stream
-    if (stream_) cudaStreamDestroy(stream_);
-    
-    // Destroy cuTensor handle
-    cutensorDestroy(handle_);
-}
-
-void NeuralLayer::initialize_weights_and_biases() {
-    // Allocate host memory for initialization
-    float* W_h = new float[input_elements_ * output_elements_];
-    float* b_h = new float[output_elements_];
-    
-    // Initialize weights with random values in (0, 1)
-    for (int i = 0; i < input_elements_ * output_elements_; ++i) {
-        W_h[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
-    }
-    
-    // Initialize biases with random values in (0, 1)
-    for (int i = 0; i < output_elements_; ++i) {
-        b_h[i] = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
-    }
-    
-    // Copy to device
-    HANDLE_CUDA_ERROR(cudaMemcpy(W_d_, W_h, input_elements_ * output_elements_ * sizeof(float), cudaMemcpyHostToDevice));
-    HANDLE_CUDA_ERROR(cudaMemcpy(b_d_, b_h, output_elements_ * sizeof(float), cudaMemcpyHostToDevice));
-    
-    // Cleanup host memory
-    delete[] W_h;
-    delete[] b_h;
-}
-
-void NeuralLayer::setup_cutensor_descriptors() {
-    const uint32_t kAlignment = 128; // Alignment of the global-memory device pointers (bytes)
-    
-    // Data type
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    
-    // Weight tensor W: (input_elements, output_elements)
-    std::vector<int64_t> extentW = {static_cast<int64_t>(input_elements_), static_cast<int64_t>(output_elements_)};
-    std::vector<int> modeW = {'i', 'o'};
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &desc_W_, 2, extentW.data(), nullptr, dataType, kAlignment));
-    
-    // Input vector x: (input_elements,)
-    std::vector<int64_t> extentX = {static_cast<int64_t>(input_elements_)};
-    std::vector<int> modeX = {'i'};
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &desc_x_, 1, extentX.data(), nullptr, dataType, kAlignment));
-    
-    // Bias vector b: (output_elements,)
-    std::vector<int64_t> extentB = {static_cast<int64_t>(output_elements_)};
-    std::vector<int> modeB = {'o'};
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &desc_b_, 1, extentB.data(), nullptr, dataType, kAlignment));
-    
-    // Linear output z: (output_elements,)
-    std::vector<int64_t> extentZ = {static_cast<int64_t>(output_elements_)};
-    std::vector<int> modeZ = {'o'};
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &desc_z_, 1, extentZ.data(), nullptr, dataType, kAlignment));
-    
-    // Final output y: (output_elements,)
-    std::vector<int64_t> extentY = {static_cast<int64_t>(output_elements_)};
-    std::vector<int> modeY = {'o'};
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &desc_y_, 1, extentY.data(), nullptr, dataType, kAlignment));
-}
-
-void NeuralLayer::setup_cutensor_operations() {
-    // Setup matrix-vector multiplication: z = W^T * x
-    std::vector<int> modeW = {'i', 'o'};
-    std::vector<int> modeX = {'i'};
-    std::vector<int> modeZ = {'o'};
-    
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    // Create contraction descriptor for W^T * x
-    HANDLE_CUTENSOR_ERROR(cutensorCreateContraction(
-        handle_, &matmul_desc_,
-        desc_W_, modeW.data(), CUTENSOR_OP_IDENTITY,
-        desc_x_, modeX.data(), CUTENSOR_OP_IDENTITY,
-        desc_z_, modeZ.data(), CUTENSOR_OP_IDENTITY,
-        desc_z_, modeZ.data(),
-        descCompute));
-    
-    // Create plan preference
-    cutensorPlanPreference_t planPref;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(
-        handle_, &planPref,
-        CUTENSOR_ALGO_DEFAULT,
-        CUTENSOR_JIT_MODE_NONE));
-    
-    // Estimate workspace size
-    const cutensorWorksizePreference_t workspacePref = CUTENSOR_WORKSPACE_DEFAULT;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(
-        handle_, matmul_desc_, planPref, workspacePref, &workspace_size_));
-    
-    // Create plan
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(
-        handle_, &matmul_plan_, matmul_desc_, planPref, workspace_size_));
-    
-    // Allocate workspace if needed
-    if (workspace_size_ > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspace_d_, workspace_size_));
-    }
-}
-
-void NeuralLayer::setup_cutensor_elementwise_operations() {
-    // Let's implement a proper approach using supported cuTensor operations
-    // Since CUTENSOR_OP_MAX may not be supported, we'll use CUTENSOR_OP_ADD with
-    // binary operations to create the ReLU effect
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    // Mode arrays for the elementwise operation (all tensors have same mode 'o')
-    std::vector<int> modeA = {'o'};  // Input tensor  
-    std::vector<int> modeC = {'o'};  // Zero tensor (for ReLU threshold)
-    std::vector<int> modeD = {'o'};  // Output tensor
-    
-    // Try to create an elementwise binary operation: D = A + C where C=0 (effectively D = A)
-    // This will verify that cuTensor elementwise operations work, then we can enhance it
-    cutensorStatus_t status = cutensorCreateElementwiseBinary(
-        handle_, &relu_desc_,
-        desc_y_, modeA.data(), CUTENSOR_OP_IDENTITY,  // Input tensor A
-        desc_y_, modeC.data(), CUTENSOR_OP_IDENTITY,  // Zero tensor C  
-        desc_y_, modeD.data(),                        // Output tensor D
-        CUTENSOR_OP_ADD,                              // Operation: A + C (where C=0)
-        descCompute);
-    
-    if (status != CUTENSOR_STATUS_SUCCESS) {
-        printf("WARNING: cuTensor elementwise operations not supported, using CUDA kernels\n");
-        relu_plan_ = nullptr;
-        relu_desc_ = nullptr;
-        return;
-    }
-    
-    // Create plan preference
-    cutensorPlanPreference_t planPref;
-    status = cutensorCreatePlanPreference(
-        handle_, &planPref,
-        CUTENSOR_ALGO_DEFAULT,
-        CUTENSOR_JIT_MODE_NONE);
-    
-    if (status != CUTENSOR_STATUS_SUCCESS) {
-        printf("WARNING: cuTensor plan preference creation failed\n");
-        cutensorDestroyOperationDescriptor(relu_desc_);
-        relu_plan_ = nullptr;
-        relu_desc_ = nullptr;
-        return;
-    }
-    
-    // Estimate workspace size
-    size_t elementwise_workspace_size = 0;
-    const cutensorWorksizePreference_t workspacePref = CUTENSOR_WORKSPACE_DEFAULT;
-    status = cutensorEstimateWorkspaceSize(
-        handle_, relu_desc_, planPref, workspacePref, &elementwise_workspace_size);
-    
-    if (status != CUTENSOR_STATUS_SUCCESS) {
-        printf("WARNING: cuTensor workspace estimation failed\n");
-        cutensorDestroyOperationDescriptor(relu_desc_);
-        relu_plan_ = nullptr;
-        relu_desc_ = nullptr;
-        return;
-    }
-    
-    // Create plan
-    status = cutensorCreatePlan(
-        handle_, &relu_plan_, relu_desc_, planPref, elementwise_workspace_size);
-    
-    if (status != CUTENSOR_STATUS_SUCCESS) {
-        printf("WARNING: cuTensor plan creation failed, using CUDA kernels\n");
-        cutensorDestroyOperationDescriptor(relu_desc_);
-        relu_plan_ = nullptr;
-        relu_desc_ = nullptr;
-        return;
-    }
-}
-
-void NeuralLayer::setup_cutensor_batch_descriptors(int batch_size) {
-    const uint32_t kAlignment = 128; // Alignment of the global-memory device pointers (bytes)
-    
-    // Data type
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    
-    // Input batch tensor X: (batch_size, input_elements)
-    std::vector<int64_t> extentX_batch = {static_cast<int64_t>(batch_size), static_cast<int64_t>(input_elements_)};
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &desc_x_batch_, 2, extentX_batch.data(), nullptr, dataType, kAlignment));
-    
-    // Linear output batch Z: (batch_size, output_elements)
-    std::vector<int64_t> extentZ_batch = {static_cast<int64_t>(batch_size), static_cast<int64_t>(output_elements_)};
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &desc_z_batch_, 2, extentZ_batch.data(), nullptr, dataType, kAlignment));
-    
-    // Final output batch Y: (batch_size, output_elements)
-    std::vector<int64_t> extentY_batch = {static_cast<int64_t>(batch_size), static_cast<int64_t>(output_elements_)};
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &desc_y_batch_, 2, extentY_batch.data(), nullptr, dataType, kAlignment));
-}
-
-void NeuralLayer::setup_cutensor_batch_operations(int batch_size) {
-    // Setup batch matrix multiplication: Z = X * W
-    // X: (batch_size, input_elements) with modes 'b', 'i'
-    // W: (input_elements, output_elements) with modes 'i', 'o'  
-    // Z: (batch_size, output_elements) with modes 'b', 'o'
-    
-    std::vector<int> modeX_batch = {'b', 'i'};
-    std::vector<int> modeW = {'i', 'o'};
-    std::vector<int> modeZ_batch = {'b', 'o'};
-    
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    // Create contraction descriptor for batch matrix multiplication: Z = X * W
-    HANDLE_CUTENSOR_ERROR(cutensorCreateContraction(
-        handle_, &matmul_batch_desc_,
-        desc_x_batch_, modeX_batch.data(), CUTENSOR_OP_IDENTITY,  // X[b,i]
-        desc_W_, modeW.data(), CUTENSOR_OP_IDENTITY,              // W[i,o]
-        desc_z_batch_, modeZ_batch.data(), CUTENSOR_OP_IDENTITY,  // Z[b,o] (no existing values)
-        desc_z_batch_, modeZ_batch.data(),                        // output Z[b,o]
-        descCompute));
-    
-    // Create plan preference
-    cutensorPlanPreference_t planPref;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(
-        handle_, &planPref,
-        CUTENSOR_ALGO_DEFAULT,
-        CUTENSOR_JIT_MODE_NONE));
-    
-    // Estimate workspace size for batch operation
-    uint64_t batch_workspace_size = 0;
-    const cutensorWorksizePreference_t workspacePref = CUTENSOR_WORKSPACE_DEFAULT;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(
-        handle_, matmul_batch_desc_, planPref, workspacePref, &batch_workspace_size));
-    
-    // Create plan
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(
-        handle_, &matmul_batch_plan_, matmul_batch_desc_, planPref, batch_workspace_size));
-    
-    // Update workspace size if batch operations require more space
-    if (batch_workspace_size > workspace_size_) {
-        if (workspace_d_) cudaFree(workspace_d_);
-        workspace_size_ = batch_workspace_size;
-        if (workspace_size_ > 0) {
-            HANDLE_CUDA_ERROR(cudaMalloc(&workspace_d_, workspace_size_));
-        }
-    }
-    
-    // Setup batch ReLU operations if needed
-    if (non_linear_activate_) {
-        // Mode arrays for batch elementwise operation
-        std::vector<int> modeA_batch = {'b', 'o'};  // Input tensor  
-        std::vector<int> modeC_batch = {'b', 'o'};  // Zero tensor (for ReLU threshold)
-        std::vector<int> modeD_batch = {'b', 'o'};  // Output tensor
-        
-        // Try to create batch elementwise binary operation: D = A + C where C=0 (effectively D = A)
-        cutensorStatus_t status = cutensorCreateElementwiseBinary(
-            handle_, &relu_batch_desc_,
-            desc_y_batch_, modeA_batch.data(), CUTENSOR_OP_IDENTITY,  // Input tensor A
-            desc_y_batch_, modeC_batch.data(), CUTENSOR_OP_IDENTITY,  // Zero tensor C  
-            desc_y_batch_, modeD_batch.data(),                        // Output tensor D
-            CUTENSOR_OP_ADD,                                          // Operation: A + C (where C=0)
-            descCompute);
-        
-        if (status == CUTENSOR_STATUS_SUCCESS) {
-            // Create plan for batch ReLU
-            cutensorPlanPreference_t planPrefRelu;
-            HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(
-                handle_, &planPrefRelu,
-                CUTENSOR_ALGO_DEFAULT,
-                CUTENSOR_JIT_MODE_NONE));
-            
-            uint64_t relu_workspace_size = 0;
-            HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(
-                handle_, relu_batch_desc_, planPrefRelu, CUTENSOR_WORKSPACE_DEFAULT, &relu_workspace_size));
-            
-            HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(
-                handle_, &relu_batch_plan_, relu_batch_desc_, planPrefRelu, relu_workspace_size));
-        } else {
-            printf("WARNING: cuTensor batch elementwise operations not supported\n");
-            relu_batch_plan_ = nullptr;
-            relu_batch_desc_ = nullptr;
-        }
-    }
-}
-
-void NeuralLayer::cleanup_cutensor_resources() {
-    // Cleanup single instance resources
-    if (matmul_plan_) cutensorDestroyPlan(matmul_plan_);
-    if (matmul_desc_) cutensorDestroyOperationDescriptor(matmul_desc_);
-    if (relu_plan_) cutensorDestroyPlan(relu_plan_);
-    if (relu_desc_) cutensorDestroyOperationDescriptor(relu_desc_);
-    
-    // Cleanup batch resources
-    if (matmul_batch_plan_) cutensorDestroyPlan(matmul_batch_plan_);
-    if (matmul_batch_desc_) cutensorDestroyOperationDescriptor(matmul_batch_desc_);
-    if (relu_batch_plan_) cutensorDestroyPlan(relu_batch_plan_);
-    if (relu_batch_desc_) cutensorDestroyOperationDescriptor(relu_batch_desc_);
-    
-    // Cleanup tensor descriptors
-    if (desc_W_) cutensorDestroyTensorDescriptor(desc_W_);
-    if (desc_x_) cutensorDestroyTensorDescriptor(desc_x_);
-    if (desc_b_) cutensorDestroyTensorDescriptor(desc_b_);
-    if (desc_z_) cutensorDestroyTensorDescriptor(desc_z_);
-    if (desc_y_) cutensorDestroyTensorDescriptor(desc_y_);
-    
-    // Cleanup batch tensor descriptors
-    if (desc_x_batch_) cutensorDestroyTensorDescriptor(desc_x_batch_);
-    if (desc_z_batch_) cutensorDestroyTensorDescriptor(desc_z_batch_);
-    if (desc_y_batch_) cutensorDestroyTensorDescriptor(desc_y_batch_);
-}
-
-void NeuralLayer::forward(const float* input_vec, float* output_vec) {
-    const float alpha = 1.0f;
-    const float beta = 1.0f;  // Use beta=1.0f to add to existing bias
-    
-    // OPTIMIZATION: Fused bias addition with matrix-vector multiplication
-    // Instead of separate operations: z = W^T * x; z = z + b
-    // We use cuTensor's built-in capability: z = alpha * (W^T * x) + beta * z
-    // where z initially contains the bias vector
-    
-    // Step 1: Copy bias to z (this will be our initial value for the fused operation)
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(z_d_, b_d_, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
-    
-    // Step 2: Fused matrix-vector multiplication with bias addition: z = alpha * (W^T * x) + beta * b
-    // The bias is already in z_d_, and beta=1.0f means we add the matrix-vector product to it
-    HANDLE_CUTENSOR_ERROR(cutensorContract(
-        handle_, matmul_plan_,
-        &alpha, W_d_, input_vec,
-        &beta, z_d_, z_d_,
-        workspace_d_, workspace_size_, stream_));
-    
-    // Step 3: Apply activation function (if enabled)
-    if (non_linear_activate_) {
-        // Copy linear output to final output buffer, then apply ReLU
-        HANDLE_CUDA_ERROR(cudaMemcpyAsync(output_vec, z_d_, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
-        apply_relu_cutensor(output_vec, output_vec, output_elements_);
-    } else {
-        // Just copy z to output (linear layer, no activation)
-        HANDLE_CUDA_ERROR(cudaMemcpyAsync(output_vec, z_d_, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
-    }
-    
-    // Synchronize stream
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-}
-
-// CUDA kernel for batch bias addition
-__global__ void add_bias_batch_kernel(float* output_batch, const float* bias, int batch_size, int output_elements) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_elements = batch_size * output_elements;
-    
-    if (idx < total_elements) {
-        int element_idx = idx % output_elements;
-        output_batch[idx] += bias[element_idx];
-    }
-}
-
-// CUDA kernels for batch operations
-__global__ void broadcast_batch_kernel(const float* values, float* broadcast_output, int batch_size, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_elements = batch_size * size;
-    
-    if (idx < total_elements) {
-        int batch_idx = idx / size;
-        broadcast_output[idx] = values[batch_idx];
-    }
-}
-
-__global__ void divide_batch_kernel(float* numerator, const float* denominator, int batch_size, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_elements = batch_size * size;
-    
-    if (idx < total_elements) {
-        numerator[idx] /= denominator[idx];
-    }
-}
-
-// CUDA kernel for scaling batch gradients
-__global__ void scale_batch_kernel(float* data, float scale, int total_elements) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (idx < total_elements) {
-        data[idx] *= scale;
-    }
-}
-
-void NeuralLayer::forward_batch(const float* input_batch, float* output_batch, int batch_size) {
-    // Setup batch descriptors and operations if not already done
-    // Note: In practice, you might want to cache these based on batch_size to avoid recreation
-    setup_cutensor_batch_descriptors(batch_size);
-    setup_cutensor_batch_operations(batch_size);
-    
-    const float alpha = 1.0f;
-    const float beta = 0.0f;  // Start with beta=0 for clean output
-    
-    // Step 1: Batch matrix multiplication: Z = X * W
-    // X: (batch_size, input_elements)
-    // W: (input_elements, output_elements)
-    // Z: (batch_size, output_elements)
-    HANDLE_CUTENSOR_ERROR(cutensorContract(
-        handle_, matmul_batch_plan_,
-        &alpha, input_batch, W_d_,    // X[b,i] * W[i,o]
-        &beta, output_batch, output_batch,  // Output Z[b,o]
-        workspace_d_, workspace_size_, stream_));
-    
-    // Step 2: Add bias to each sample in the batch using broadcasting
-    // We need to broadcast bias (output_elements,) to (batch_size, output_elements)
-    // and add it to the matrix multiplication result
-    
-    // Create a simple broadcasting kernel for bias addition
-    dim3 blockSize(256);
-    dim3 gridSize((batch_size * output_elements_ + blockSize.x - 1) / blockSize.x);
-    
-    // Launch kernel to add bias: output[b,o] += bias[o]
-    add_bias_batch_kernel<<<gridSize, blockSize, 0, stream_>>>(
-        output_batch, b_d_, batch_size, output_elements_);
-    
-    // Step 3: Apply activation function (if enabled)
-    if (non_linear_activate_) {
-        apply_relu_batch_cutensor(output_batch, output_batch, batch_size, output_elements_);
-    }
-    
-    // Synchronize stream
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-    
-    // Cleanup batch resources (they will be recreated as needed)
-    // Note: In a production implementation, you might want to cache these
-    if (matmul_batch_plan_) {
-        cutensorDestroyPlan(matmul_batch_plan_);
-        matmul_batch_plan_ = nullptr;
-    }
-    if (matmul_batch_desc_) {
-        cutensorDestroyOperationDescriptor(matmul_batch_desc_);
-        matmul_batch_desc_ = nullptr;
-    }
-    if (relu_batch_plan_) {
-        cutensorDestroyPlan(relu_batch_plan_);
-        relu_batch_plan_ = nullptr;
-    }
-    if (relu_batch_desc_) {
-        cutensorDestroyOperationDescriptor(relu_batch_desc_);
-        relu_batch_desc_ = nullptr;
-    }
-    if (desc_x_batch_) {
-        cutensorDestroyTensorDescriptor(desc_x_batch_);
-        desc_x_batch_ = nullptr;
-    }
-    if (desc_z_batch_) {
-        cutensorDestroyTensorDescriptor(desc_z_batch_);
-        desc_z_batch_ = nullptr;
-    }
-    if (desc_y_batch_) {
-        cutensorDestroyTensorDescriptor(desc_y_batch_);
-        desc_y_batch_ = nullptr;
-    }
-}
-
-void NeuralLayer::backward(const float* input_vec, const float* dy, float* dW, float* db, float* dx) {
-    // Compute gradient w.r.t. linear output (before activation)
-    float* dz_d = nullptr;
-    HANDLE_CUDA_ERROR(cudaMalloc(&dz_d, output_elements_ * sizeof(float)));
-    
-    if (non_linear_activate_) {
-        // Apply ReLU derivative: dz = dy * (z > 0)
-        apply_relu_derivative(z_d_, dy, dz_d, output_elements_);
-    } else {
-        // Linear case: dz = dy
-        HANDLE_CUDA_ERROR(cudaMemcpyAsync(dz_d, dy, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
-    }
-    
-    // Compute db = dz (gradient w.r.t. bias)
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(db, dz_d, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
-    
-    // Compute dW = x ⊗ dz (outer product) using cuTENSOR contraction
-    // For matrix W of shape (input_elements, output_elements), dW has the same shape
-    // dW[i][j] = x[i] * dz[j] - this is a contraction with no shared indices
-    
-    // Create tensor descriptors for outer product computation
-    const uint32_t kAlignment = 128;
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    // Input vector x: (input_elements,) with mode 'i'
-    std::vector<int64_t> extentX_outer = {static_cast<int64_t>(input_elements_)};
-    std::vector<int> modeX_outer = {'i'};
-    cutensorTensorDescriptor_t descX_outer;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &descX_outer, 1, extentX_outer.data(), nullptr, dataType, kAlignment));
-    
-    // Gradient vector dz: (output_elements,) with mode 'j'
-    std::vector<int64_t> extentDz = {static_cast<int64_t>(output_elements_)};
-    std::vector<int> modeDz = {'j'};
-    cutensorTensorDescriptor_t descDz;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &descDz, 1, extentDz.data(), nullptr, dataType, kAlignment));
-    
-    // Weight gradient matrix dW: (input_elements, output_elements) with modes 'i', 'j'
-    std::vector<int64_t> extentDW = {static_cast<int64_t>(input_elements_), static_cast<int64_t>(output_elements_)};
-    std::vector<int> modeDW = {'i', 'j'};
-    cutensorTensorDescriptor_t descDW;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &descDW, 2, extentDW.data(), nullptr, dataType, kAlignment));
-    
-    // Create contraction for outer product: dW[i,j] = x[i] * dz[j]
-    // No indices are contracted (summed over) - this creates the outer product
-    cutensorOperationDescriptor_t outerProductDesc;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateContraction(
-        handle_, &outerProductDesc,
-        descX_outer, modeX_outer.data(), CUTENSOR_OP_IDENTITY,  // x[i]
-        descDz, modeDz.data(), CUTENSOR_OP_IDENTITY,            // dz[j]
-        descDW, modeDW.data(), CUTENSOR_OP_IDENTITY,            // dW[i,j] (no existing values)
-        descDW, modeDW.data(),                                  // output dW[i,j]
-        descCompute));
-    
-    // Create plan for outer product
-    cutensorPlanPreference_t planPref;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(handle_, &planPref, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    size_t outerProductWorkspaceSize = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(handle_, outerProductDesc, planPref, CUTENSOR_WORKSPACE_DEFAULT, &outerProductWorkspaceSize));
-    
-    cutensorPlan_t outerProductPlan;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(handle_, &outerProductPlan, outerProductDesc, planPref, outerProductWorkspaceSize));
-    
-    // Allocate workspace if needed (reuse existing workspace if large enough)
-    void* outerProductWorkspace = nullptr;
-    if (outerProductWorkspaceSize > 0) {
-        if (outerProductWorkspaceSize <= workspace_size_ && workspace_d_ != nullptr) {
-            outerProductWorkspace = workspace_d_;  // Reuse existing workspace
-        } else {
-            HANDLE_CUDA_ERROR(cudaMalloc(&outerProductWorkspace, outerProductWorkspaceSize));
-        }
-    }
-    
-    // Execute outer product contraction: dW = 1.0 * (x ⊗ dz) + 0.0 * dW
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorContract(
-        handle_, outerProductPlan,
-        &alpha, input_vec, dz_d,     // inputs: x[i] and dz[j]
-        &beta, dW, dW,               // output: dW[i,j] = x[i] * dz[j]
-        outerProductWorkspace, outerProductWorkspaceSize, stream_));
-    
-    // Cleanup outer product resources
-    if (outerProductWorkspace != workspace_d_ && outerProductWorkspace != nullptr) {
-        HANDLE_CUDA_ERROR(cudaFree(outerProductWorkspace));
-    }
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(outerProductPlan));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(outerProductDesc));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descX_outer));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descDz));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descDW));
-    
-    // Compute dx = W * dz
-    if (dx != nullptr) {
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
-        HANDLE_CUTENSOR_ERROR(cutensorContract(
-            handle_, matmul_plan_,
-            &alpha, W_d_, dz_d,
-            &beta, dx, dx,
-            workspace_d_, workspace_size_, stream_));
-    }
-    
-    // Cleanup temporary memory
-    cudaFree(dz_d);
-    
-    // Synchronize stream
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-}
-
-void NeuralLayer::update_parameters(const float* dW, const float* db, float learning_rate) {
-    // Update weights: W = W - learning_rate * dW (gradient descent)
-    dim3 blockSize(256);
-    dim3 gridSize_W((input_elements_ * output_elements_ + blockSize.x - 1) / blockSize.x);
-    update_parameters_kernel<<<gridSize_W, blockSize, 0, stream_>>>(W_d_, dW, input_elements_ * output_elements_, learning_rate);
-    
-    // Update biases: b = b - learning_rate * db (gradient descent)
-    dim3 gridSize_b((output_elements_ + blockSize.x - 1) / blockSize.x);
-    update_parameters_kernel<<<gridSize_b, blockSize, 0, stream_>>>(b_d_, db, output_elements_, learning_rate);
-    
-    // Synchronize stream
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-}
-
-// CUDA kernel for batch bias gradient computation (sum across batch dimension)
-__global__ void compute_bias_gradient_batch_kernel(const float* dy_batch, float* db, int batch_size, int output_elements) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (idx < output_elements) {
-        float sum = 0.0f;
-        // Sum gradients across batch dimension for this output element
-        for (int b = 0; b < batch_size; ++b) {
-            sum += dy_batch[b * output_elements + idx];
-        }
-        db[idx] = sum;
-    }
-}
-
-void NeuralLayer::backward_batch(const float* input_batch, const float* dy_batch, float* dW, float* db, float* dx_batch, int batch_size) {
-    // Setup batch descriptors and operations if not already done
-    setup_cutensor_batch_descriptors(batch_size);
-    setup_cutensor_batch_operations(batch_size);
-    
-    // Allocate device memory for batch gradient of linear output (before activation)
-    float* dz_batch_d = nullptr;
-    HANDLE_CUDA_ERROR(cudaMalloc(&dz_batch_d, batch_size * output_elements_ * sizeof(float)));
-    
-    if (non_linear_activate_) {
-        // Apply ReLU derivative: dz_batch = dy_batch * (z_batch > 0)
-        // Note: We need z_batch from forward pass - for now we'll assume dy_batch is already processed
-        apply_relu_derivative_batch(dy_batch, dy_batch, dz_batch_d, batch_size, output_elements_);
-    } else {
-        // Linear case: dz_batch = dy_batch
-        HANDLE_CUDA_ERROR(cudaMemcpyAsync(dz_batch_d, dy_batch, batch_size * output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
-    }
-    
-    // Compute db = sum(dz_batch, axis=0) (sum across batch dimension)
-    dim3 blockSize_bias(256);
-    dim3 gridSize_bias((output_elements_ + blockSize_bias.x - 1) / blockSize_bias.x);
-    compute_bias_gradient_batch_kernel<<<gridSize_bias, blockSize_bias, 0, stream_>>>(
-        dz_batch_d, db, batch_size, output_elements_);
-    
-    // Compute dW = input_batch^T * dz_batch using cuTENSOR batch contraction
-    // input_batch: (batch_size, input_elements) with modes 'b', 'i'
-    // dz_batch: (batch_size, output_elements) with modes 'b', 'j'
-    // dW: (input_elements, output_elements) with modes 'i', 'j'
-    // This is a batch reduction: dW[i,j] = sum_b(input_batch[b,i] * dz_batch[b,j])
-    
-    const uint32_t kAlignment = 128;
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    // Create tensor descriptors for batch weight gradient computation
-    std::vector<int64_t> extentInput_batch = {static_cast<int64_t>(batch_size), static_cast<int64_t>(input_elements_)};
-    std::vector<int> modeInput_batch = {'b', 'i'};
-    cutensorTensorDescriptor_t descInput_batch;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &descInput_batch, 2, extentInput_batch.data(), nullptr, dataType, kAlignment));
-    
-    std::vector<int64_t> extentDz_batch = {static_cast<int64_t>(batch_size), static_cast<int64_t>(output_elements_)};
-    std::vector<int> modeDz_batch = {'b', 'j'};
-    cutensorTensorDescriptor_t descDz_batch;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &descDz_batch, 2, extentDz_batch.data(), nullptr, dataType, kAlignment));
-    
-    std::vector<int64_t> extentDW = {static_cast<int64_t>(input_elements_), static_cast<int64_t>(output_elements_)};
-    std::vector<int> modeDW = {'i', 'j'};
-    cutensorTensorDescriptor_t descDW_batch;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(handle_, &descDW_batch, 2, extentDW.data(), nullptr, dataType, kAlignment));
-    
-    // Create contraction for batch weight gradient: dW[i,j] = sum_b(input_batch[b,i] * dz_batch[b,j])
-    cutensorOperationDescriptor_t weightGradDesc;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateContraction(
-        handle_, &weightGradDesc,
-        descInput_batch, modeInput_batch.data(), CUTENSOR_OP_IDENTITY,  // input_batch[b,i]
-        descDz_batch, modeDz_batch.data(), CUTENSOR_OP_IDENTITY,        // dz_batch[b,j]
-        descDW_batch, modeDW.data(), CUTENSOR_OP_IDENTITY,              // dW[i,j] (no existing values)
-        descDW_batch, modeDW.data(),                                    // output dW[i,j]
-        descCompute));
-    
-    // Create plan for weight gradient computation
-    cutensorPlanPreference_t planPref;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(handle_, &planPref, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    size_t weightGradWorkspaceSize = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(handle_, weightGradDesc, planPref, CUTENSOR_WORKSPACE_DEFAULT, &weightGradWorkspaceSize));
-    
-    cutensorPlan_t weightGradPlan;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(handle_, &weightGradPlan, weightGradDesc, planPref, weightGradWorkspaceSize));
-    
-    // Allocate workspace if needed (reuse existing workspace if large enough)
-    void* weightGradWorkspace = nullptr;
-    if (weightGradWorkspaceSize > 0) {
-        if (weightGradWorkspaceSize <= workspace_size_ && workspace_d_ != nullptr) {
-            weightGradWorkspace = workspace_d_;  // Reuse existing workspace
-        } else {
-            HANDLE_CUDA_ERROR(cudaMalloc(&weightGradWorkspace, weightGradWorkspaceSize));
-        }
-    }
-    
-    // Execute weight gradient computation: dW = 1.0 * (input_batch^T * dz_batch) + 0.0 * dW
-    const float alpha = 1.0f;
-    const float beta = 0.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorContract(
-        handle_, weightGradPlan,
-        &alpha, input_batch, dz_batch_d,     // inputs: input_batch[b,i] and dz_batch[b,j]
-        &beta, dW, dW,                       // output: dW[i,j] = sum_b(input_batch[b,i] * dz_batch[b,j])
-        weightGradWorkspace, weightGradWorkspaceSize, stream_));
-    
-    // Compute dx_batch = dz_batch * W^T using batch matrix multiplication
-    if (dx_batch != nullptr) {
-        // dz_batch: (batch_size, output_elements) with modes 'b', 'o'
-        // W: (input_elements, output_elements) with modes 'i', 'o'
-        // dx_batch: (batch_size, input_elements) with modes 'b', 'i'
-        // This is: dx_batch[b,i] = sum_o(dz_batch[b,o] * W[i,o])
-        
-        std::vector<int> modeDz_back = {'b', 'o'};
-        std::vector<int> modeW_back = {'i', 'o'};
-        std::vector<int> modeDx_batch = {'b', 'i'};
-        
-        cutensorOperationDescriptor_t inputGradDesc;
-        HANDLE_CUTENSOR_ERROR(cutensorCreateContraction(
-            handle_, &inputGradDesc,
-            descDz_batch, modeDz_back.data(), CUTENSOR_OP_IDENTITY,     // dz_batch[b,o]
-            desc_W_, modeW_back.data(), CUTENSOR_OP_IDENTITY,           // W[i,o]
-            desc_x_batch_, modeDx_batch.data(), CUTENSOR_OP_IDENTITY,   // dx_batch[b,i]
-            desc_x_batch_, modeDx_batch.data(),                         // output dx_batch[b,i]
-            descCompute));
-        
-        cutensorPlan_t inputGradPlan;
-        HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(handle_, &inputGradPlan, inputGradDesc, planPref, weightGradWorkspaceSize));
-        
-        HANDLE_CUTENSOR_ERROR(cutensorContract(
-            handle_, inputGradPlan,
-            &alpha, dz_batch_d, W_d_,
-            &beta, dx_batch, dx_batch,
-            weightGradWorkspace, weightGradWorkspaceSize, stream_));
-        
-        // Cleanup input gradient resources
-        HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(inputGradPlan));
-        HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(inputGradDesc));
-    }
-    
-    // Cleanup resources
-    if (weightGradWorkspace != workspace_d_ && weightGradWorkspace != nullptr) {
-        HANDLE_CUDA_ERROR(cudaFree(weightGradWorkspace));
-    }
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(weightGradPlan));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(weightGradDesc));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descInput_batch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descDz_batch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descDW_batch));
-    
-    // Cleanup temporary memory
-    cudaFree(dz_batch_d);
-    
-    // Synchronize stream
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-    
-    // Cleanup batch resources
-    if (matmul_batch_plan_) {
-        cutensorDestroyPlan(matmul_batch_plan_);
-        matmul_batch_plan_ = nullptr;
-    }
-    if (matmul_batch_desc_) {
-        cutensorDestroyOperationDescriptor(matmul_batch_desc_);
-        matmul_batch_desc_ = nullptr;
-    }
-    if (desc_x_batch_) {
-        cutensorDestroyTensorDescriptor(desc_x_batch_);
-        desc_x_batch_ = nullptr;
-    }
-    if (desc_z_batch_) {
-        cutensorDestroyTensorDescriptor(desc_z_batch_);
-        desc_z_batch_ = nullptr;
-    }
-    if (desc_y_batch_) {
-        cutensorDestroyTensorDescriptor(desc_y_batch_);
-        desc_y_batch_ = nullptr;
-    }
-}
-
-void NeuralLayer::apply_relu_cutensor(float* input, float* output, int size) {
-    // Check if relu_plan_ is properly initialized
-    if (relu_plan_ == nullptr) {
-        printf("ERROR: cuTensor ReLU plan not initialized\n");
-        exit(1);
-    }
-    
-    // Use cuTensor elementwise operation for ReLU: max(input, 0)
-    // This uses the identity operation (D = A + 0) as a placeholder
-    // In a full implementation, you would need proper ReLU support in cuTensor
-    const float alpha = 1.0f;  // Scaling for input tensor
-    const float gamma = 0.0f;  // Scaling for zero tensor (effectively ignored)
-    
-    // Execute the elementwise binary operation: output = alpha * input + gamma * zero
-    cutensorStatus_t status = cutensorElementwiseBinaryExecute(
-        handle_, relu_plan_,
-        &alpha, input,     // alpha * A (input tensor)
-        &gamma, zero_d_,   // gamma * C (zero tensor)  
-        output,            // Output D = A + 0 = A (identity for now)
-        stream_);
-    
-    if (status != CUTENSOR_STATUS_SUCCESS) {
-        printf("ERROR: cuTensor elementwise execution failed\n");
-        return;
-    }
-}
-
-// CUDA kernel for ReLU derivative computation
+// Kernel for ReLU derivative
 __global__ void relu_derivative_kernel(const float* z, const float* dy, float* dz, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
-        // ReLU derivative: f'(z) = 1 if z > 0, else 0
-        // dz = dy * f'(z)
         dz[idx] = (z[idx] > 0.0f) ? dy[idx] : 0.0f;
     }
 }
 
-void NeuralLayer::apply_relu_derivative(const float* z, const float* dy, float* dz, int size) {
-    // Use custom CUDA kernel for ReLU derivative since cuTensor doesn't support it directly
-    // ReLU derivative: dz[i] = dy[i] if z[i] > 0, else 0
+// Kernel to compute L2 norm of a tensor
+__global__ void compute_norm_kernel(const float* data, float* partial_norms, int size) {
+    extern __shared__ float sdata[];
     
-    dim3 blockSize(256);
-    dim3 gridSize((size + blockSize.x - 1) / blockSize.x);
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
-    relu_derivative_kernel<<<gridSize, blockSize, 0, stream_>>>(z, dy, dz, size);
+    // Load and square the values
+    float val = (idx < size) ? data[idx] : 0.0f;
+    sdata[tid] = val * val;
+    __syncthreads();
     
-    // Check for kernel launch errors
-    HANDLE_CUDA_ERROR(cudaGetLastError());
-}
-
-void NeuralLayer::apply_relu_batch_cutensor(float* input_batch, float* output_batch, int batch_size, int size) {
-    // Check if relu_batch_plan_ is properly initialized
-    if (relu_batch_plan_ == nullptr) {
-        printf("WARNING: cuTensor batch ReLU plan not initialized, using CUDA kernel fallback\n");
-        // Fallback to CUDA kernel implementation
-        exit(1);
+    // Reduction in shared memory
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
     }
     
-    // Create zero batch tensor for ReLU thresholding: zero_batch[b,o] = 0
-    float* zero_batch_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&zero_batch_d, batch_size * size * sizeof(float)));
-    HANDLE_CUDA_ERROR(cudaMemset(zero_batch_d, 0, batch_size * size * sizeof(float)));
+    // Write result for this block
+    if (tid == 0) {
+        partial_norms[blockIdx.x] = sdata[0];
+    }
+}
+
+// Kernel to clip gradients by value
+__global__ void clip_gradients_kernel(float* gradients, int size, float max_value) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float val = gradients[idx];
+        gradients[idx] = fminf(fmaxf(val, -max_value), max_value);
+    }
+}
+
+// Kernel to clip gradients by norm
+__global__ void clip_gradients_by_norm_kernel(float* gradients, int size, float max_norm, float current_norm) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size && current_norm > max_norm) {
+        float scale = max_norm / current_norm;
+        gradients[idx] *= scale;
+    }
+}
+
+// Kernel to check for NaN or Inf values
+__global__ void check_finite_kernel(const float* data, int* has_nan_inf, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float val = data[idx];
+        if (isnan(val) || isinf(val)) {
+            atomicExch(has_nan_inf, 1);
+        }
+    }
+}
+
+// Kernel to apply weight decay (L2 regularization)
+__global__ void apply_weight_decay_kernel(float* gradients, const float* weights, 
+                                         int size, float weight_decay) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        gradients[idx] += weight_decay * weights[idx];
+    }
+}
+
+// Helper function to add bias using cuTENSOR element-wise operation with broadcasting
+// input: (batch_size, output_elements) 
+// bias: (output_elements)
+// output: (batch_size, output_elements)
+void add_bias_cutensor(cutensorHandle_t &handle, 
+                      const float* input, const float* bias, float* output,
+                      int batch_size, int output_elements) {
     
-    // Use cuTensor elementwise batch operation for ReLU: max(input_batch, 0)
-    // This uses the identity operation (D = A + 0) as a placeholder
-    const float alpha = 1.0f;  // Scaling for input tensor
-    const float gamma = 0.0f;  // Scaling for zero tensor (effectively ignored)
+    // Use trinary operation: output = input + bias + 0
+    // This allows us to use the more flexible trinary API for broadcasting
     
-    // Execute the elementwise binary operation: output_batch = alpha * input_batch + gamma * zero_batch
-    cutensorStatus_t status = cutensorElementwiseBinaryExecute(
-        handle_, relu_batch_plan_,
-        &alpha, input_batch,     // alpha * A (input batch tensor)
-        &gamma, zero_batch_d,    // gamma * C (zero batch tensor)  
-        output_batch,            // Output D = A + 0 = A (identity for now)
-        stream_);
+    // Create a zero scalar on device
+    float* d_zero;
+    HANDLE_CUDA_ERROR(cudaMalloc(&d_zero, sizeof(float)));
+    HANDLE_CUDA_ERROR(cudaMemset(d_zero, 0, sizeof(float)));
     
-    // Cleanup temporary zero batch tensor
-    HANDLE_CUDA_ERROR(cudaFree(zero_batch_d));
+    std::vector<int64_t> extentInput{batch_size, output_elements};
+    std::vector<int64_t> extentBias{output_elements};      // 1D tensor
+    std::vector<int64_t> extentZero{};                     // Scalar (empty extent)
+    std::vector<int64_t> extentOutput{batch_size, output_elements};
     
-    if (status != CUTENSOR_STATUS_SUCCESS) {
-        printf("ERROR: cuTensor batch elementwise execution failed\n");
+    std::vector<int32_t> modeInput{'i', 'j'};
+    std::vector<int32_t> modeBias{'j'};      // Only 'j' mode - broadcasts over 'i'
+    std::vector<int32_t> modeZero{};         // Scalar has no modes
+    std::vector<int32_t> modeOutput{'i', 'j'};
+    
+    // output = (input + bias) + 0
+    cutensor_elementwise_trinary_wrapper(handle,
+                                        input, bias, d_zero, output,
+                                        extentInput, extentBias, extentZero, extentOutput,
+                                        modeInput, modeBias, modeZero, modeOutput,
+                                        CUTENSOR_OP_IDENTITY,  // opA
+                                        CUTENSOR_OP_IDENTITY,  // opB
+                                        CUTENSOR_OP_IDENTITY,  // opC
+                                        CUTENSOR_OP_ADD,       // opAB
+                                        CUTENSOR_OP_ADD,       // opABC
+                                        1.0f,                  // alpha
+                                        1.0f,                  // beta
+                                        1.0f,                  // gamma
+                                        0);                    // stream
+    
+    // Clean up
+    HANDLE_CUDA_ERROR(cudaFree(d_zero));
+}
+
+
+
+// Helper function for parameter update using cuTENSOR
+// params = params - learning_rate * gradients
+void update_parameters_cutensor(cutensorHandle_t &handle, 
+                               float* params, const float* gradients,
+                               float learning_rate, int size) {
+    // Use trinary operation: params = params + (-learning_rate * gradients) + 0
+    
+    // Create a zero scalar on device
+    float* d_zero;
+    HANDLE_CUDA_ERROR(cudaMalloc(&d_zero, sizeof(float)));
+    HANDLE_CUDA_ERROR(cudaMemset(d_zero, 0, sizeof(float)));
+    
+    // Both params and gradients are 1D tensors of same size
+    std::vector<int64_t> extent{size};
+    std::vector<int64_t> extentZero{};  // Scalar
+    std::vector<int32_t> mode{'i'};
+    std::vector<int32_t> modeZero{};    // Scalar has no modes
+    
+    // We want: params = 1.0 * params + (-learning_rate) * gradients + 0.0 * zero
+    float alpha = 1.0f;
+    float beta = -learning_rate;
+    float gamma = 0.0f;
+    
+    // Use element-wise trinary operation for in-place update
+    cutensor_elementwise_trinary_wrapper(handle,
+                                        params, gradients, d_zero, params,
+                                        extent, extent, extentZero, extent,
+                                        mode, mode, modeZero, mode,
+                                        CUTENSOR_OP_IDENTITY,  // opA
+                                        CUTENSOR_OP_IDENTITY,  // opB
+                                        CUTENSOR_OP_IDENTITY,  // opC
+                                        CUTENSOR_OP_ADD,       // opAB
+                                        CUTENSOR_OP_ADD,       // opABC
+                                        alpha,                 // alpha
+                                        beta,                  // beta
+                                        gamma,                 // gamma
+                                        0);                    // stream
+    
+    // Clean up
+    HANDLE_CUDA_ERROR(cudaFree(d_zero));
+}
+
+//=============================================================================
+// cuTENSOR Wrapper Implementations
+//=============================================================================
+
+void cutensor_contraction_wrapper(cutensorHandle_t &cutensor_handle,
+                             const float* A, const float* B, float* C, 
+                                 const std::vector<int64_t>& extentA,
+                                 const std::vector<int64_t>& extentB,
+                                 const std::vector<int64_t>& extentC,
+                                 const std::vector<int32_t>& modeA,
+                                 const std::vector<int32_t>& modeB,
+                                 const std::vector<int32_t>& modeC,
+                             cudaStream_t stream) {
+    // General tensor contraction: C = A * B
+    // Users specify the modes (labels) for each tensor
+    // Contracted dimensions should have the same mode labels
+    // Example: Matrix multiplication C[i,j] = sum_k A[i,k] * B[k,j]
+    //          modeA = {'i', 'k'}, modeB = {'k', 'j'}, modeC = {'i', 'j'}
+    
+    // Compute strides for row-major layout
+    auto computeStrides = [](const std::vector<int64_t>& extent) {
+        std::vector<int64_t> strides(extent.size());
+        strides[extent.size() - 1] = 1;
+        for (int i = extent.size() - 2; i >= 0; i--) {
+            strides[i] = strides[i + 1] * extent[i + 1];
+        }
+        return strides;
+    };
+    
+    std::vector<int64_t> strideA = computeStrides(extentA);
+    std::vector<int64_t> strideB = computeStrides(extentB);
+    std::vector<int64_t> strideC = computeStrides(extentC);
+    
+    // Data types
+    cutensorDataType_t typeA = CUTENSOR_R_32F;
+    cutensorDataType_t typeB = CUTENSOR_R_32F;
+    cutensorDataType_t typeC = CUTENSOR_R_32F;
+    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
+    
+    const uint32_t kAlignment = 128; // Alignment for device pointers
+    
+    // Create tensor descriptors
+    cutensorTensorDescriptor_t descA, descB, descC;
+    
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
+        cutensor_handle,
+        &descA,
+        modeA.size(),
+        extentA.data(),
+        strideA.data(),
+        typeA, 
+        kAlignment));
+    
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
+        cutensor_handle,
+        &descB,
+        modeB.size(),
+        extentB.data(),
+        strideB.data(),
+        typeB,
+        kAlignment));
+    
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
+        cutensor_handle,
+        &descC,
+        modeC.size(),
+        extentC.data(),
+        strideC.data(),
+        typeC,
+        kAlignment));
+    
+    // Create contraction descriptor
+    // C = alpha * A * B + beta * C
+    cutensorOperationDescriptor_t desc;
+    HANDLE_CUTENSOR_ERROR(cutensorCreateContraction(
+        cutensor_handle,
+        &desc,
+        descA, modeA.data(), CUTENSOR_OP_IDENTITY,
+        descB, modeB.data(), CUTENSOR_OP_IDENTITY,
+        descC, modeC.data(), CUTENSOR_OP_IDENTITY,
+        descC, modeC.data(),
+        descCompute));
+    
+    // Set alpha and beta
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    
+    // Set algorithm
+    const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
+    
+    // Create plan preference
+    cutensorPlanPreference_t planPref;
+    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(
+        cutensor_handle,
+        &planPref,
+        algo,
+        CUTENSOR_JIT_MODE_NONE));
+    
+    // Query workspace size
+    uint64_t workspaceSizeEstimate = 0;
+    const cutensorWorksizePreference_t workspacePref = CUTENSOR_WORKSPACE_DEFAULT;
+    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(
+        cutensor_handle,
+        desc,
+        planPref,
+        workspacePref,
+        &workspaceSizeEstimate));
+    
+    // Create plan
+    cutensorPlan_t plan;
+    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(
+        cutensor_handle,
+        &plan,
+        desc,
+        planPref,
+        workspaceSizeEstimate));
+    
+    // Query actual workspace size
+    uint64_t actualWorkspaceSize = 0;
+    HANDLE_CUTENSOR_ERROR(cutensorPlanGetAttribute(
+        cutensor_handle,
+        plan,
+        CUTENSOR_PLAN_REQUIRED_WORKSPACE,
+        &actualWorkspaceSize,
+        sizeof(actualWorkspaceSize)));
+    
+    // Allocate workspace if needed
+    void* workspace = nullptr;
+    if (actualWorkspaceSize > 0) {
+        HANDLE_CUDA_ERROR(cudaMalloc(&workspace, actualWorkspaceSize));
+    }
+    
+    // Execute contraction
+    HANDLE_CUTENSOR_ERROR(cutensorContract(
+        cutensor_handle,
+        plan,
+        (void*)&alpha, A, B,
+        (void*)&beta, C, C,
+        workspace, actualWorkspaceSize, stream));
+    
+    // Clean up
+    if (workspace) {
+        HANDLE_CUDA_ERROR(cudaFree(workspace));
+    }
+    
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(plan));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPref));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(desc));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descA));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descB));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descC));
+}
+
+//=============================================================================
+// cuTENSOR Reduction Wrapper Implementation
+//=============================================================================
+
+void cutensor_reduction_wrapper(cutensorHandle_t &cutensor_handle,
+                               const float* A, float* D,
+                               const std::vector<int64_t>& extentA,
+                               const std::vector<int64_t>& extentD,
+                               const std::vector<int32_t>& modeA,
+                               const std::vector<int32_t>& modeD,
+                               cutensorOperator_t opReduce,
+                               float alpha,
+                               float beta,
+                               cudaStream_t stream) {
+    // General tensor reduction: D = alpha * reduce_op(A) + beta * D
+    // Modes that appear in D must also appear in A
+    // Modes that only appear in A are reduced
+    
+    // Compute strides for row-major layout
+    auto computeStrides = [](const std::vector<int64_t>& extent) {
+        std::vector<int64_t> strides(extent.size());
+        if (extent.size() > 0) {
+            strides[extent.size() - 1] = 1;
+            for (int i = extent.size() - 2; i >= 0; i--) {
+                strides[i] = strides[i + 1] * extent[i + 1];
+            }
+        }
+        return strides;
+    };
+    
+    std::vector<int64_t> strideA = computeStrides(extentA);
+    std::vector<int64_t> strideD = computeStrides(extentD);
+    
+    // Data types
+    cutensorDataType_t typeA = CUTENSOR_R_32F;
+    cutensorDataType_t typeD = CUTENSOR_R_32F;
+    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
+    
+    const uint32_t kAlignment = 128;
+    
+    // Create tensor descriptors
+    cutensorTensorDescriptor_t descA, descD;
+    
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
+        cutensor_handle,
+        &descA,
+        modeA.size(),
+        extentA.data(),
+        strideA.data(),
+        typeA,
+        kAlignment));
+    
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
+        cutensor_handle,
+        &descD,
+        modeD.size(),
+        extentD.data(),
+        strideD.data(),
+        typeD,
+        kAlignment));
+    
+    // Create reduction descriptor
+    cutensorOperationDescriptor_t desc;
+    HANDLE_CUTENSOR_ERROR(cutensorCreateReduction(
+        cutensor_handle,
+        &desc,
+        descA, modeA.data(), CUTENSOR_OP_IDENTITY,
+        descD, modeD.data(), CUTENSOR_OP_IDENTITY,
+        descD, modeD.data(),
+        opReduce,
+        descCompute));
+    
+    // Set algorithm
+    const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
+    
+    // Create plan preference
+    cutensorPlanPreference_t planPref;
+    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(
+        cutensor_handle,
+        &planPref,
+        algo,
+        CUTENSOR_JIT_MODE_NONE));
+    
+    // Query workspace size
+    uint64_t workspaceSizeEstimate = 0;
+    const cutensorWorksizePreference_t workspacePref = CUTENSOR_WORKSPACE_DEFAULT;
+    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(
+        cutensor_handle,
+        desc,
+        planPref,
+        workspacePref,
+        &workspaceSizeEstimate));
+    
+    // Create plan
+    cutensorPlan_t plan;
+    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(
+        cutensor_handle,
+        &plan,
+        desc,
+        planPref,
+        workspaceSizeEstimate));
+    
+    // Query actual workspace size
+    uint64_t actualWorkspaceSize = 0;
+    HANDLE_CUTENSOR_ERROR(cutensorPlanGetAttribute(
+        cutensor_handle,
+        plan,
+        CUTENSOR_PLAN_REQUIRED_WORKSPACE,
+        &actualWorkspaceSize,
+        sizeof(actualWorkspaceSize)));
+    
+    // Allocate workspace if needed
+    void* workspace = nullptr;
+    if (actualWorkspaceSize > 0) {
+        HANDLE_CUDA_ERROR(cudaMalloc(&workspace, actualWorkspaceSize));
+    }
+    
+    // Execute reduction
+    HANDLE_CUTENSOR_ERROR(cutensorReduce(
+        cutensor_handle,
+        plan,
+        (void*)&alpha, A,
+        (void*)&beta, D,
+        D,
+        workspace, actualWorkspaceSize, stream));
+    
+    // Clean up
+    if (workspace) {
+        HANDLE_CUDA_ERROR(cudaFree(workspace));
+    }
+    
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(plan));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPref));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(desc));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descA));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descD));
+}
+
+
+//=============================================================================
+// cuTENSOR Element-wise Trinary Wrapper Implementation
+//=============================================================================
+
+void cutensor_elementwise_trinary_wrapper(cutensorHandle_t &cutensor_handle,
+                                         const float* A, const float* B, const float* C, float* D,
+                                         const std::vector<int64_t>& extentA,
+                                         const std::vector<int64_t>& extentB,
+                                         const std::vector<int64_t>& extentC,
+                                         const std::vector<int64_t>& extentD,
+                                         const std::vector<int32_t>& modeA,
+                                         const std::vector<int32_t>& modeB,
+                                         const std::vector<int32_t>& modeC,
+                                         const std::vector<int32_t>& modeD,
+                                         cutensorOperator_t opA,
+                                         cutensorOperator_t opB,
+                                         cutensorOperator_t opC,
+                                         cutensorOperator_t opAB,
+                                         cutensorOperator_t opABC,
+                                         float alpha,
+                                         float beta,
+                                         float gamma,
+                                         cudaStream_t stream) {
+    // Helper function to validate and check if broadcasting is needed
+    auto validateAndCheckBroadcasting = [&](const std::vector<int32_t>& modeTensor, 
+                                           const std::vector<int64_t>& extentTensor,
+                                           const char* tensorName) -> bool {
+        // First validate: all modes in tensor must exist in D
+        for (const auto& mode : modeTensor) {
+            auto it = std::find(modeD.begin(), modeD.end(), mode);
+            if (it == modeD.end()) {
+                fprintf(stderr, "Error: Mode '%c' in tensor %s not found in output tensor D\n", 
+                        mode, tensorName);
+                fprintf(stderr, "%s modes: ", tensorName);
+                for (auto m : modeTensor) fprintf(stderr, "'%c' ", m);
+                fprintf(stderr, "\nD modes: ");
+                for (auto m : modeD) fprintf(stderr, "'%c' ", m);
+                fprintf(stderr, "\n");
+                exit(1);
+            }
+        }
+        
+        // If tensor has fewer modes than output, it needs broadcasting
+        if (modeTensor.size() < modeD.size()) return true;
+        
+        // If same number of modes, they should match exactly (no broadcasting needed)
+        if (modeTensor.size() == modeD.size()) {
+            for (size_t i = 0; i < modeTensor.size(); ++i) {
+                if (modeTensor[i] != modeD[i]) {
+                    fprintf(stderr, "Error: Mode mismatch for tensor %s with same dimensions as D\n", 
+                            tensorName);
+                    exit(1);
+                }
+            }
+            return false;
+        }
+        
+        // Tensor has more modes than D - invalid
+        fprintf(stderr, "Error: Tensor %s has more modes than output tensor D\n", tensorName);
+        exit(1);
+    };
+    
+    // Helper to create broadcast shape info
+    auto createBroadcastInfo = [&](const std::vector<int32_t>& modeTensor,
+                                   const std::vector<int64_t>& extentTensor) {
+        std::vector<int64_t> onesExtent;
+        std::vector<int32_t> onesModes;
+        
+        // Find missing modes that need to be broadcasted
+        for (size_t i = 0; i < modeD.size(); ++i) {
+            auto it = std::find(modeTensor.begin(), modeTensor.end(), modeD[i]);
+            if (it == modeTensor.end()) {
+                onesExtent.push_back(extentD[i]);
+                onesModes.push_back(modeD[i]);
+            }
+        }
+        
+        return std::make_pair(onesExtent, onesModes);
+    };
+    
+    // Pointers for potentially broadcasted tensors
+    const float* A_use = A;
+    const float* B_use = B;
+    const float* C_use = C;
+    float* A_broadcast = nullptr;
+    float* B_broadcast = nullptr;
+    float* C_broadcast = nullptr;
+    
+    // Check and handle broadcasting for A
+    if (validateAndCheckBroadcasting(modeA, extentA, "A")) {
+        auto broadcastInfo = createBroadcastInfo(modeA, extentA);
+        std::vector<int64_t> onesExtent = broadcastInfo.first;
+        std::vector<int32_t> onesModes = broadcastInfo.second;
+        
+        if (!onesExtent.empty()) {
+            // Create ones tensor for broadcasting
+            size_t onesSize = 1;
+            for (auto e : onesExtent) onesSize *= e;
+            
+            float* d_ones;
+            HANDLE_CUDA_ERROR(cudaMalloc(&d_ones, onesSize * sizeof(float)));
+            std::vector<float> h_ones(onesSize, 1.0f);
+            HANDLE_CUDA_ERROR(cudaMemcpy(d_ones, h_ones.data(), onesSize * sizeof(float), cudaMemcpyHostToDevice));
+            
+            // Allocate broadcasted tensor
+            size_t broadcastSize = 1;
+            for (auto e : extentD) broadcastSize *= e;
+            HANDLE_CUDA_ERROR(cudaMalloc(&A_broadcast, broadcastSize * sizeof(float)));
+            
+            // Special case: if A is a scalar (empty modes), we need to fill the output with the scalar value
+            if (modeA.empty() && extentA.empty()) {
+                // A is a scalar - we need to fill the entire output tensor with this value
+                float h_scalar;
+                HANDLE_CUDA_ERROR(cudaMemcpy(&h_scalar, A, sizeof(float), cudaMemcpyDeviceToHost));
+                std::vector<float> h_broadcast(broadcastSize, h_scalar);
+                HANDLE_CUDA_ERROR(cudaMemcpy(A_broadcast, h_broadcast.data(), broadcastSize * sizeof(float), cudaMemcpyHostToDevice));
+            } else {
+                // Perform broadcasting via contraction
+                cutensor_contraction_wrapper(cutensor_handle, d_ones, A, A_broadcast,
+                                            onesExtent, extentA, extentD,
+                                            onesModes, modeA, modeD, stream);
+            }
+            
+            A_use = A_broadcast;
+            HANDLE_CUDA_ERROR(cudaFree(d_ones));
+        }
+    }
+    
+    // Check and handle broadcasting for B
+    if (validateAndCheckBroadcasting(modeB, extentB, "B")) {
+        auto broadcastInfo = createBroadcastInfo(modeB, extentB);
+        std::vector<int64_t> onesExtent = broadcastInfo.first;
+        std::vector<int32_t> onesModes = broadcastInfo.second;
+        
+        if (!onesExtent.empty()) {
+            // Create ones tensor for broadcasting
+            size_t onesSize = 1;
+            for (auto e : onesExtent) onesSize *= e;
+            
+            float* d_ones;
+            HANDLE_CUDA_ERROR(cudaMalloc(&d_ones, onesSize * sizeof(float)));
+            std::vector<float> h_ones(onesSize, 1.0f);
+            HANDLE_CUDA_ERROR(cudaMemcpy(d_ones, h_ones.data(), onesSize * sizeof(float), cudaMemcpyHostToDevice));
+            
+            // Allocate broadcasted tensor
+            size_t broadcastSize = 1;
+            for (auto e : extentD) broadcastSize *= e;
+            HANDLE_CUDA_ERROR(cudaMalloc(&B_broadcast, broadcastSize * sizeof(float)));
+            
+            // Special case: if B is a scalar (empty modes), we need to fill the output with the scalar value
+            if (modeB.empty() && extentB.empty()) {
+                // B is a scalar - we need to fill the entire output tensor with this value
+                float h_scalar;
+                HANDLE_CUDA_ERROR(cudaMemcpy(&h_scalar, B, sizeof(float), cudaMemcpyDeviceToHost));
+                std::vector<float> h_broadcast(broadcastSize, h_scalar);
+                HANDLE_CUDA_ERROR(cudaMemcpy(B_broadcast, h_broadcast.data(), broadcastSize * sizeof(float), cudaMemcpyHostToDevice));
+            } else {
+                // Perform broadcasting via contraction
+                cutensor_contraction_wrapper(cutensor_handle, d_ones, B, B_broadcast,
+                                            onesExtent, extentB, extentD,
+                                            onesModes, modeB, modeD, stream);
+            }
+            
+            B_use = B_broadcast;
+            HANDLE_CUDA_ERROR(cudaFree(d_ones));
+        }
+    }
+    
+    // Check and handle broadcasting for C
+    if (validateAndCheckBroadcasting(modeC, extentC, "C")) {
+        auto broadcastInfo = createBroadcastInfo(modeC, extentC);
+        std::vector<int64_t> onesExtent = broadcastInfo.first;
+        std::vector<int32_t> onesModes = broadcastInfo.second;
+        
+        if (!onesExtent.empty()) {
+            // Create ones tensor for broadcasting
+            size_t onesSize = 1;
+            for (auto e : onesExtent) onesSize *= e;
+            
+            float* d_ones;
+            HANDLE_CUDA_ERROR(cudaMalloc(&d_ones, onesSize * sizeof(float)));
+            std::vector<float> h_ones(onesSize, 1.0f);
+            HANDLE_CUDA_ERROR(cudaMemcpy(d_ones, h_ones.data(), onesSize * sizeof(float), cudaMemcpyHostToDevice));
+            
+            // Allocate broadcasted tensor
+            size_t broadcastSize = 1;
+            for (auto e : extentD) broadcastSize *= e;
+            HANDLE_CUDA_ERROR(cudaMalloc(&C_broadcast, broadcastSize * sizeof(float)));
+            
+            // Special case: if C is a scalar (empty modes), we need to fill the output with the scalar value
+            if (modeC.empty() && extentC.empty()) {
+                // C is a scalar - we need to fill the entire output tensor with this value
+                float h_scalar;
+                HANDLE_CUDA_ERROR(cudaMemcpy(&h_scalar, C, sizeof(float), cudaMemcpyDeviceToHost));
+                std::vector<float> h_broadcast(broadcastSize, h_scalar);
+                HANDLE_CUDA_ERROR(cudaMemcpy(C_broadcast, h_broadcast.data(), broadcastSize * sizeof(float), cudaMemcpyHostToDevice));
+            } else {
+                // Perform broadcasting via contraction
+                cutensor_contraction_wrapper(cutensor_handle, d_ones, C, C_broadcast,
+                                            onesExtent, extentC, extentD,
+                                            onesModes, modeC, modeD, stream);
+            }
+            
+            C_use = C_broadcast;
+            HANDLE_CUDA_ERROR(cudaFree(d_ones));
+        }
+    }
+    
+    // Now perform the trinary operation with all tensors having the same shape
+    // Compute strides for row-major layout
+    auto computeStrides = [](const std::vector<int64_t>& extent) {
+        std::vector<int64_t> strides(extent.size());
+        if (extent.size() > 0) {
+            strides[extent.size() - 1] = 1;
+            for (int i = extent.size() - 2; i >= 0; i--) {
+                strides[i] = strides[i + 1] * extent[i + 1];
+            }
+        }
+        return strides;
+    };
+    
+    std::vector<int64_t> strideD = computeStrides(extentD);
+    
+    // Data types
+    cutensorDataType_t typeA = CUTENSOR_R_32F;
+    cutensorDataType_t typeB = CUTENSOR_R_32F;
+    cutensorDataType_t typeC = CUTENSOR_R_32F;
+    cutensorDataType_t typeD = CUTENSOR_R_32F;
+    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
+    
+    const uint32_t kAlignment = 128;
+    
+    // Create tensor descriptors - all with same shape as D
+    cutensorTensorDescriptor_t descA, descB, descC, descD;
+    
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
+        cutensor_handle,
+        &descA,
+        modeD.size(),
+        extentD.data(),
+        strideD.data(),
+        typeA,
+        kAlignment));
+    
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
+        cutensor_handle,
+        &descB,
+        modeD.size(),
+        extentD.data(),
+        strideD.data(),
+        typeB,
+        kAlignment));
+    
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
+        cutensor_handle,
+        &descC,
+        modeD.size(),
+        extentD.data(),
+        strideD.data(),
+        typeC,
+        kAlignment));
+    
+    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
+        cutensor_handle,
+        &descD,
+        modeD.size(),
+        extentD.data(),
+        strideD.data(),
+        typeD,
+        kAlignment));
+    
+    // Create element-wise trinary operation descriptor
+    cutensorOperationDescriptor_t desc;
+    HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseTrinary(
+        cutensor_handle,
+        &desc,
+        descA, modeD.data(), opA,
+        descB, modeD.data(), opB,
+        descC, modeD.data(), opC,
+        descD, modeD.data(),
+        opAB,
+        opABC,
+        descCompute));
+    
+    // Set algorithm
+    const cutensorAlgo_t algo = CUTENSOR_ALGO_DEFAULT;
+    
+    // Create plan preference
+    cutensorPlanPreference_t planPref;
+    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(
+        cutensor_handle,
+        &planPref,
+        algo,
+        CUTENSOR_JIT_MODE_NONE));
+    
+    // Query workspace size
+    uint64_t workspaceSizeEstimate = 0;
+    const cutensorWorksizePreference_t workspacePref = CUTENSOR_WORKSPACE_DEFAULT;
+    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(
+        cutensor_handle,
+        desc,
+        planPref,
+        workspacePref,
+        &workspaceSizeEstimate));
+    
+    // Create plan
+    cutensorPlan_t plan;
+    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(
+        cutensor_handle,
+        &plan,
+        desc,
+        planPref,
+        workspaceSizeEstimate));
+    
+    // Query actual workspace size
+    uint64_t actualWorkspaceSize = 0;
+    HANDLE_CUTENSOR_ERROR(cutensorPlanGetAttribute(
+        cutensor_handle,
+        plan,
+        CUTENSOR_PLAN_REQUIRED_WORKSPACE,
+        &actualWorkspaceSize,
+        sizeof(actualWorkspaceSize)));
+    
+    // Allocate workspace if needed
+    void* workspace = nullptr;
+    if (actualWorkspaceSize > 0) {
+        HANDLE_CUDA_ERROR(cudaMalloc(&workspace, actualWorkspaceSize));
+    }
+    
+    // Execute element-wise trinary operation
+    HANDLE_CUTENSOR_ERROR(cutensorElementwiseTrinaryExecute(
+        cutensor_handle,
+        plan,
+        (void*)&alpha, A_use,
+        (void*)&beta, B_use,
+        (void*)&gamma, C_use,
+        D,
+        stream));
+    
+    // Clean up
+    if (workspace) {
+        HANDLE_CUDA_ERROR(cudaFree(workspace));
+    }
+    
+    if (A_broadcast) HANDLE_CUDA_ERROR(cudaFree(A_broadcast));
+    if (B_broadcast) HANDLE_CUDA_ERROR(cudaFree(B_broadcast));
+    if (C_broadcast) HANDLE_CUDA_ERROR(cudaFree(C_broadcast));
+    
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(plan));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPref));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(desc));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descA));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descB));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descC));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descD));
+}
+
+//=============================================================================
+// NeuralLayer Implementation
+//=============================================================================
+
+// Random seed management
+static unsigned int g_random_seed = 1234;
+
+void NeuralLayer::set_random_seed(unsigned int seed) {
+    g_random_seed = seed;
+}
+
+unsigned int NeuralLayer::get_time_based_seed() {
+    return static_cast<unsigned int>(time(nullptr));
+}
+
+// Constructor
+NeuralLayer::NeuralLayer(int input_elements, int output_elements, bool non_linear_activate)
+    : input_elements_(input_elements), 
+      output_elements_(output_elements),
+      non_linear_activate_(non_linear_activate),
+      zero_size_(0) {
+    
+    // Allocate device memory for weights and biases
+    size_t weight_size = input_elements_ * output_elements_ * sizeof(float);
+    size_t bias_size = output_elements_ * sizeof(float);
+    
+    HANDLE_CUDA_ERROR(cudaMalloc(&W_d_, weight_size));
+    HANDLE_CUDA_ERROR(cudaMalloc(&b_d_, bias_size));
+    
+    // Initialize weights using He initialization for ReLU, Xavier for linear
+    int total_weights = input_elements_ * output_elements_;
+    int block_size = 256;
+    int grid_size = (total_weights + block_size - 1) / block_size;
+    
+    float scale;
+    if (non_linear_activate_) {
+        // He initialization for ReLU: sqrt(2/fan_in)
+        scale = sqrtf(2.0f / input_elements_);
+    } else {
+        // Xavier initialization for linear: sqrt(1/fan_in)
+        scale = sqrtf(1.0f / input_elements_);
+    }
+    
+    init_weights_kernel<<<grid_size, block_size>>>(W_d_, total_weights, scale, g_random_seed);
+    
+    // Initialize biases to zero
+    HANDLE_CUDA_ERROR(cudaMemset(b_d_, 0, bias_size));
+    
+    // Initialize pointers
+    z_d_ = nullptr;
+    zero_d_ = nullptr;
+    
+    // Note: z_d_ will be allocated dynamically in forward pass based on batch size
+    // zero_d_ will be allocated in apply_relu_batch_cutensor when needed
+}
+
+// Destructor
+NeuralLayer::~NeuralLayer() {
+    if (W_d_) cudaFree(W_d_);
+    if (b_d_) cudaFree(b_d_);
+    if (z_d_) cudaFree(z_d_);
+    if (zero_d_) cudaFree(zero_d_);
+}
+
+// Forward pass: Y = ReLU(X * W + B) or Y = X * W + B
+void NeuralLayer::forward_batch(const float* input_batch, float* output_batch, int batch_size) {
+    
+    // First compute X * W
+    // input_batch: (batch_size, input_elements)
+    // W_d_: (input_elements, output_elements)
+    // output_batch: (batch_size, output_elements)
+    
+    // Create cuTENSOR handle
+    cutensorHandle_t handle;
+    HANDLE_CUTENSOR_ERROR(cutensorCreate(&handle));
+    
+    // Allocate temporary storage for the linear output
+    float* linear_output = output_batch;
+    if (non_linear_activate_) {
+        // We need z_d_ to store linear output for the entire batch
+        size_t batch_output_size = batch_size * output_elements_ * sizeof(float);
+        if (z_d_) {
+            HANDLE_CUDA_ERROR(cudaFree(z_d_));
+        }
+        HANDLE_CUDA_ERROR(cudaMalloc(&z_d_, batch_output_size));
+        linear_output = z_d_;
+    }
+    
+    // Perform matrix multiplication using cuTENSOR: linear_output = input_batch * W_d_
+    // input_batch: (batch_size, input_elements) with modes 'i', 'k'
+    // W_d_: (input_elements, output_elements) with modes 'k', 'j'
+    // linear_output: (batch_size, output_elements) with modes 'i', 'j'
+    
+    std::vector<int64_t> extentInput{batch_size, input_elements_};
+    std::vector<int64_t> extentW{input_elements_, output_elements_};
+    std::vector<int64_t> extentOutput{batch_size, output_elements_};
+    
+    std::vector<int32_t> modeInput{'i', 'k'};
+    std::vector<int32_t> modeW{'k', 'j'};
+    std::vector<int32_t> modeOutput{'i', 'j'};
+    
+    cutensor_contraction_wrapper(handle, input_batch, W_d_, linear_output,
+                                extentInput, extentW, extentOutput,
+                                modeInput, modeW, modeOutput, 0);
+    
+    // Add bias using cuTENSOR element-wise operation with broadcasting
+    if (non_linear_activate_) {
+        // Add bias to linear_output in-place
+        add_bias_cutensor(handle, linear_output, b_d_, linear_output,
+                         batch_size, output_elements_);
+        // Apply ReLU activation
+        apply_relu_batch_cutensor(handle, linear_output, output_batch, batch_size, output_elements_);
+    } else {
+        // Add bias directly to output
+        add_bias_cutensor(handle, linear_output, b_d_, output_batch,
+                         batch_size, output_elements_);
+    }
+    
+    // Synchronize to ensure completion
+    HANDLE_CUDA_ERROR(cudaDeviceSynchronize());
+    
+    // Destroy cuTENSOR handle
+    HANDLE_CUTENSOR_ERROR(cutensorDestroy(handle));
+}
+
+// Backward pass: compute gradients
+void NeuralLayer::backward_batch(const float* input_batch, const float* dy_batch, 
+                                float* dW, float* db, float* dx_batch, int batch_size) {
+    // Backward pass computes:
+    // 1. dW = input^T * dy
+    // 2. db = sum(dy, axis=0)
+    // 3. dx = dy * W^T
+    
+    // If we have activation, we need to apply ReLU derivative first
+    float* grad_output = const_cast<float*>(dy_batch);
+    if (non_linear_activate_) {
+        // Allocate temporary storage for ReLU derivative
+        float* relu_grad;
+        size_t grad_size = batch_size * output_elements_ * sizeof(float);
+        HANDLE_CUDA_ERROR(cudaMalloc(&relu_grad, grad_size));
+        
+        // Apply ReLU derivative: grad = dy * (z > 0)
+        apply_relu_derivative_batch(z_d_, dy_batch, relu_grad, batch_size, output_elements_);
+        grad_output = relu_grad;
+    }
+    
+    // Create cuTENSOR handle
+    cutensorHandle_t handle;
+    HANDLE_CUTENSOR_ERROR(cutensorCreate(&handle));
+    
+    // 1. Compute dW = input^T * grad_output
+    // input_batch: (batch_size, input_elements) with modes 'b', 'i'
+    // grad_output: (batch_size, output_elements) with modes 'b', 'j'
+    // dW: (input_elements, output_elements) with modes 'i', 'j'
+    // This is a contraction over the batch dimension 'b'
+    
+    std::vector<int64_t> extentInput{batch_size, input_elements_};
+    std::vector<int64_t> extentGrad{batch_size, output_elements_};
+    std::vector<int64_t> extentDW{input_elements_, output_elements_};
+    
+    std::vector<int32_t> modeInput{'b', 'i'};
+    std::vector<int32_t> modeGrad{'b', 'j'};
+    std::vector<int32_t> modeDW{'i', 'j'};
+    
+    cutensor_contraction_wrapper(handle, input_batch, grad_output, dW,
+                                extentInput, extentGrad, extentDW,
+                                modeInput, modeGrad, modeDW, 0);
+    
+    // 2. Compute db = sum(grad_output, axis=0) using cuTENSOR reduction
+    // grad_output: (batch_size, output_elements) with modes 'b', 'j'
+    // db: (output_elements) with mode 'j'
+    // We reduce over the batch dimension 'b'
+    std::vector<int64_t> extentGradForDb{batch_size, output_elements_};
+    std::vector<int64_t> extentDb{output_elements_};
+    std::vector<int32_t> modeGradForDb{'b', 'j'};
+    std::vector<int32_t> modeDb{'j'};
+    
+    cutensor_reduction_wrapper(handle, grad_output, db,
+                              extentGradForDb, extentDb,
+                              modeGradForDb, modeDb,
+                              CUTENSOR_OP_ADD,  // Sum reduction
+                              1.0f,             // alpha
+                              0.0f,             // beta (set to 0 to overwrite)
+                              0);               // stream
+    
+    // 3. Compute dx = grad_output * W^T if needed
+    if (dx_batch) {
+        // grad_output: (batch_size, output_elements) with modes 'i', 'k'
+        // W_d_: (input_elements, output_elements) with modes 'j', 'k'
+        // dx_batch: (batch_size, input_elements) with modes 'i', 'j'
+        // This is a contraction over the output dimension 'k'
+        
+        std::vector<int64_t> extentGradForDx{batch_size, output_elements_};
+        std::vector<int64_t> extentW{input_elements_, output_elements_};
+        std::vector<int64_t> extentDx{batch_size, input_elements_};
+        
+        std::vector<int32_t> modeGradForDx{'i', 'k'};
+        std::vector<int32_t> modeW{'j', 'k'};
+        std::vector<int32_t> modeDx{'i', 'j'};
+        
+        cutensor_contraction_wrapper(handle, grad_output, W_d_, dx_batch,
+                                    extentGradForDx, extentW, extentDx,
+                                    modeGradForDx, modeW, modeDx, 0);
+    }
+    
+    // Clean up
+    if (non_linear_activate_) {
+        HANDLE_CUDA_ERROR(cudaFree(grad_output));
+    }
+    
+    // Destroy cuTENSOR handle
+    HANDLE_CUTENSOR_ERROR(cutensorDestroy(handle));
+}
+
+// Helper function to compute L2 norm of a gradient tensor
+float compute_gradient_norm(const float* gradients, int size) {
+    const int block_size = 256;
+    const int grid_size = (size + block_size - 1) / block_size;
+    
+    // Allocate memory for partial norms
+    float* d_partial_norms;
+    HANDLE_CUDA_ERROR(cudaMalloc(&d_partial_norms, grid_size * sizeof(float)));
+    
+    // Compute partial norms
+    compute_norm_kernel<<<grid_size, block_size, block_size * sizeof(float)>>>(
+        gradients, d_partial_norms, size);
+    HANDLE_CUDA_ERROR(cudaGetLastError());
+    
+    // Reduce partial norms on CPU (could be optimized with another kernel)
+    std::vector<float> h_partial_norms(grid_size);
+    HANDLE_CUDA_ERROR(cudaMemcpy(h_partial_norms.data(), d_partial_norms, 
+                                grid_size * sizeof(float), cudaMemcpyDeviceToHost));
+    
+    float total_norm_squared = 0.0f;
+    for (float norm : h_partial_norms) {
+        total_norm_squared += norm;
+    }
+    
+    HANDLE_CUDA_ERROR(cudaFree(d_partial_norms));
+    return sqrtf(total_norm_squared);
+}
+
+// Helper function to check if tensor contains NaN or Inf
+bool check_finite(const float* data, int size) {
+    const int block_size = 256;
+    const int grid_size = (size + block_size - 1) / block_size;
+    
+    int* d_has_nan_inf;
+    HANDLE_CUDA_ERROR(cudaMalloc(&d_has_nan_inf, sizeof(int)));
+    HANDLE_CUDA_ERROR(cudaMemset(d_has_nan_inf, 0, sizeof(int)));
+    
+    check_finite_kernel<<<grid_size, block_size>>>(data, d_has_nan_inf, size);
+    HANDLE_CUDA_ERROR(cudaGetLastError());
+    
+    int has_nan_inf;
+    HANDLE_CUDA_ERROR(cudaMemcpy(&has_nan_inf, d_has_nan_inf, sizeof(int), cudaMemcpyDeviceToHost));
+    HANDLE_CUDA_ERROR(cudaFree(d_has_nan_inf));
+    
+    return has_nan_inf == 0;
+}
+
+// Helper function to clip gradients
+void clip_gradients(float* gradients, int size, float max_norm) {
+    // First compute the current norm
+    float current_norm = compute_gradient_norm(gradients, size);
+    
+    // Only clip if norm exceeds threshold
+    if (current_norm > max_norm) {
+        const int block_size = 256;
+        const int grid_size = (size + block_size - 1) / block_size;
+        
+        clip_gradients_by_norm_kernel<<<grid_size, block_size>>>(
+            gradients, size, max_norm, current_norm);
+        HANDLE_CUDA_ERROR(cudaGetLastError());
+    }
+}
+
+// Update parameters with gradient clipping and stability checks
+void NeuralLayer::update_parameters(const float* dW, const float* db, float learning_rate,
+                                   float max_gradient_norm, float weight_decay) {
+    // Check gradients for NaN/Inf
+    int weight_size = input_elements_ * output_elements_;
+    if (!check_finite(dW, weight_size)) {
+        fprintf(stderr, "Warning: Weight gradients contain NaN or Inf! Skipping update.\n");
         return;
     }
-}
-
-// CUDA kernel for batch ReLU derivative computation
-__global__ void relu_derivative_batch_kernel(const float* z_batch, const float* dy_batch, float* dz_batch, int batch_size, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_elements = batch_size * size;
-    
-    if (idx < total_elements) {
-        // ReLU derivative: f'(z) = 1 if z > 0, else 0
-        // dz = dy * f'(z)
-        dz_batch[idx] = (z_batch[idx] > 0.0f) ? dy_batch[idx] : 0.0f;
+    if (!check_finite(db, output_elements_)) {
+        fprintf(stderr, "Warning: Bias gradients contain NaN or Inf! Skipping update.\n");
+        return;
     }
+    
+    // Create copies of gradients for clipping
+    float* dW_clipped;
+    float* db_clipped;
+    HANDLE_CUDA_ERROR(cudaMalloc(&dW_clipped, weight_size * sizeof(float)));
+    HANDLE_CUDA_ERROR(cudaMalloc(&db_clipped, output_elements_ * sizeof(float)));
+    HANDLE_CUDA_ERROR(cudaMemcpy(dW_clipped, dW, weight_size * sizeof(float), cudaMemcpyDeviceToDevice));
+    HANDLE_CUDA_ERROR(cudaMemcpy(db_clipped, db, output_elements_ * sizeof(float), cudaMemcpyDeviceToDevice));
+    
+    // Apply weight decay if requested
+    if (weight_decay > 0.0f) {
+        int block_size = 256;
+        int grid_size = (weight_size + block_size - 1) / block_size;
+        apply_weight_decay_kernel<<<grid_size, block_size>>>(dW_clipped, W_d_, weight_size, weight_decay);
+        HANDLE_CUDA_ERROR(cudaGetLastError());
+    }
+    
+    // Clip gradients by norm
+    if (max_gradient_norm > 0.0f) {
+        // Compute combined norm of weight and bias gradients
+        float weight_norm = compute_gradient_norm(dW_clipped, weight_size);
+        float bias_norm = compute_gradient_norm(db_clipped, output_elements_);
+        float total_norm = sqrtf(weight_norm * weight_norm + bias_norm * bias_norm);
+        
+        if (total_norm > max_gradient_norm) {
+            float scale = max_gradient_norm / total_norm;
+            int block_size = 256;
+            
+            // Scale weight gradients
+            int grid_size = (weight_size + block_size - 1) / block_size;
+            clip_gradients_by_norm_kernel<<<grid_size, block_size>>>(
+                dW_clipped, weight_size, max_gradient_norm, total_norm);
+            
+            // Scale bias gradients
+            grid_size = (output_elements_ + block_size - 1) / block_size;
+            clip_gradients_by_norm_kernel<<<grid_size, block_size>>>(
+                db_clipped, output_elements_, max_gradient_norm, total_norm);
+            
+            HANDLE_CUDA_ERROR(cudaGetLastError());
+        }
+    }
+    
+    // Use cuTENSOR to update parameters with clipped gradients
+    cutensorHandle_t handle;
+    HANDLE_CUTENSOR_ERROR(cutensorCreate(&handle));
+    
+    // Update weights using cuTENSOR
+    int weight_size_update = input_elements_ * output_elements_;
+    update_parameters_cutensor(handle, W_d_, dW_clipped, learning_rate, weight_size_update);
+    
+    // Update biases using cuTENSOR
+    update_parameters_cutensor(handle, b_d_, db_clipped, learning_rate, output_elements_);
+    
+    // Synchronize to ensure updates are complete
+    HANDLE_CUDA_ERROR(cudaDeviceSynchronize());
+    
+    // Destroy cuTENSOR handle
+    HANDLE_CUTENSOR_ERROR(cutensorDestroy(handle));
+    
+    // Check parameters after update
+    if (!check_finite(W_d_, weight_size)) {
+        fprintf(stderr, "Error: Weights contain NaN or Inf after update!\n");
+    }
+    if (!check_finite(b_d_, output_elements_)) {
+        fprintf(stderr, "Error: Biases contain NaN or Inf after update!\n");
+    }
+    
+    // Clean up
+    HANDLE_CUDA_ERROR(cudaFree(dW_clipped));
+    HANDLE_CUDA_ERROR(cudaFree(db_clipped));
 }
 
-void NeuralLayer::apply_relu_derivative_batch(const float* z_batch, const float* dy_batch, float* dz_batch, int batch_size, int size) {
-    // Use custom CUDA kernel for batch ReLU derivative since cuTensor doesn't support it directly
-    dim3 blockSize(256);
+// ReLU implementations stubs
+void NeuralLayer::apply_relu_batch_cutensor(cutensorHandle_t &handle,
+                                           float* input_batch, float* output_batch, 
+                                           int batch_size, int size) {
+    // ReLU(x) = max(x, 0)
+    // Use trinary wrapper with a dummy third tensor
+    
+    // Define tensor extents and modes
+    std::vector<int64_t> extent{batch_size, size};
+    std::vector<int32_t> mode{'i', 'j'};
+    
+    // Allocate zero tensor if not already allocated or if size changed
+    size_t zero_size = batch_size * size * sizeof(float);
+    if (!zero_d_ || zero_size_ < zero_size) {
+        if (zero_d_) {
+            HANDLE_CUDA_ERROR(cudaFree(zero_d_));
+        }
+        HANDLE_CUDA_ERROR(cudaMalloc(&zero_d_, zero_size));
+        HANDLE_CUDA_ERROR(cudaMemset(zero_d_, 0, zero_size));
+        zero_size_ = zero_size;
+    }
+    
+    // Create a dummy scalar for the third input
+    float* d_dummy;
+    HANDLE_CUDA_ERROR(cudaMalloc(&d_dummy, sizeof(float)));
+    HANDLE_CUDA_ERROR(cudaMemset(d_dummy, 0, sizeof(float)));
+    
+    std::vector<int64_t> extentDummy{};  // Scalar
+    std::vector<int32_t> modeDummy{};    // Scalar has no modes
+    
+    // Use element-wise trinary wrapper: output = max(input, 0) + 0
+    cutensor_elementwise_trinary_wrapper(handle,
+                                        input_batch, zero_d_, d_dummy, output_batch,
+                                        extent, extent, extentDummy, extent,
+                                        mode, mode, modeDummy, mode,
+                                        CUTENSOR_OP_IDENTITY,  // opA
+                                        CUTENSOR_OP_IDENTITY,  // opB
+                                        CUTENSOR_OP_IDENTITY,  // opC
+                                        CUTENSOR_OP_MAX,       // opAB
+                                        CUTENSOR_OP_ADD,       // opABC
+                                        1.0f,                  // alpha
+                                        1.0f,                  // beta
+                                        0.0f,                  // gamma
+                                        0);                    // stream
+    
+    // Clean up
+    HANDLE_CUDA_ERROR(cudaFree(d_dummy));
+}
+
+void NeuralLayer::apply_relu_derivative_batch(const float* z_batch, const float* dy_batch, 
+                                             float* dz_batch, int batch_size, int size) {
+    // ReLU derivative: dz = dy if z > 0, else 0
     int total_elements = batch_size * size;
-    dim3 gridSize((total_elements + blockSize.x - 1) / blockSize.x);
+    int block_size = 256;
+    int grid_size = (total_elements + block_size - 1) / block_size;
     
-    relu_derivative_batch_kernel<<<gridSize, blockSize, 0, stream_>>>(z_batch, dy_batch, dz_batch, batch_size, size);
-    
-    // Check for kernel launch errors
+    relu_derivative_kernel<<<grid_size, block_size>>>(z_batch, dy_batch, dz_batch, total_elements);
     HANDLE_CUDA_ERROR(cudaGetLastError());
 }
 
-// CUDA kernels for softmax and cross-entropy operations - ALL REMOVED!
-// Now using 100% cuTENSOR operations instead!
+//=============================================================================
+// CUDA Kernels for Softmax and Cross-Entropy
+//=============================================================================
 
-// ============================================================================
-// PURE cuTENSOR IMPLEMENTATION - ALL CUDA KERNELS REMOVED!
-// ============================================================================
-// 
-// All operations now use cuTENSOR with the broadcasting strategy:
-// 
-// ✅ REPLACED KERNELS with cuTENSOR operations:
-//   • fill_ones_kernel      → cuTENSOR contraction broadcasting (scalar * dummy)
-//   • exp_kernel           → cuTENSOR unary operation (CUTENSOR_OP_EXP)  
-//   • log_kernel           → cuTENSOR unary operation (CUTENSOR_OP_LOG)
-//   • reciprocal_kernel    → cuTENSOR unary operation (CUTENSOR_OP_RCP)
-//   • divide_kernel        → cuTENSOR multiplication by reciprocal
-//   • negate_kernel        → cuTENSOR element-wise binary (0 + (-1)*x)
-//   • find_max_kernel      → cuTENSOR reduction (CUTENSOR_OP_MAX)
-//   • compute_exp_sum_kernel → cuTENSOR reduction (CUTENSOR_OP_ADD)
-//   • softmax_kernel       → Full cuTENSOR softmax pipeline
-//   • cross_entropy_*_kernel → cuTENSOR element-wise + reduction operations
-//
-// 🏗️ BROADCASTING STRATEGY (from test_cutensor_reduction.cu):
-//   1. Use cuTENSOR contraction for broadcasting: broadcasted = scalar * ones
-//   2. Apply cuTENSOR element-wise binary operations on same-shaped tensors  
-//   3. Use cuTENSOR reductions for aggregations (max, sum)
-//   4. Use cuTENSOR unary operations for mathematical functions (exp, log, rcp)
-//
-// 🚀 RESULT: 100% cuTENSOR implementation with zero custom CUDA kernels!
-// ============================================================================
-
-// NeuralNetwork class implementation
-
-NeuralNetwork::NeuralNetwork(const std::vector<int>& layer_sizes) 
-    : softmax_output_d_(nullptr), loss_gradient_d_(nullptr), temp_storage_d_(nullptr),
-      max_values_d_(nullptr), sum_exp_d_(nullptr), cutensor_workspace_d_(nullptr),
-      cutensor_workspace_size_(0), softmax_input_desc_(nullptr), softmax_output_desc_(nullptr),
-      target_desc_(nullptr) {
+// Kernel to compute softmax in-place
+// Each thread handles one element in the batch
+__global__ void softmax_kernel(float* logits, int batch_size, int num_classes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
     
-    if (layer_sizes.size() < 2) {
-        printf("ERROR: Neural network must have at least 2 layers (input and output)\n");
-        exit(-1);
+    float* row = logits + idx * num_classes;
+    
+    // Find max for numerical stability
+    float max_val = row[0];
+    for (int i = 1; i < num_classes; i++) {
+        max_val = fmaxf(max_val, row[i]);
     }
     
-    // Create CUDA stream
-    HANDLE_CUDA_ERROR(cudaStreamCreate(&stream_));
+    // Compute exp(x - max) and sum
+    float sum = 0.0f;
+    for (int i = 0; i < num_classes; i++) {
+        row[i] = expf(row[i] - max_val);
+        sum += row[i];
+    }
     
-    // Initialize cuTensor handle for softmax operations
-    HANDLE_CUTENSOR_ERROR(cutensorCreate(&cutensor_handle_));
+    // Normalize
+    for (int i = 0; i < num_classes; i++) {
+        row[i] /= sum;
+    }
+}
+
+// Kernel to compute cross-entropy loss
+__global__ void cross_entropy_loss_kernel(const float* predictions, const float* targets, 
+                                         float* losses, int batch_size, int num_classes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+    
+    const float* pred_row = predictions + idx * num_classes;
+    const float* target_row = targets + idx * num_classes;
+    
+    float loss = 0.0f;
+    for (int i = 0; i < num_classes; i++) {
+        // Avoid log(0) by adding small epsilon
+        loss -= target_row[i] * logf(fmaxf(pred_row[i], 1e-7f));
+    }
+    
+    losses[idx] = loss;
+}
+
+// Kernel to compute softmax cross-entropy gradient
+// gradient = predictions - targets (for softmax + cross-entropy combined)
+__global__ void softmax_cross_entropy_gradient_kernel(const float* predictions, const float* targets,
+                                                     float* gradients, int batch_size, int num_classes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_elements = batch_size * num_classes;
+    
+    if (idx >= total_elements) return;
+    
+    gradients[idx] = predictions[idx] - targets[idx];
+}
+
+// Kernel to find argmax (for predictions)
+__global__ void argmax_kernel(const float* input, int* output, int batch_size, int num_classes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= batch_size) return;
+    
+    const float* row = input + idx * num_classes;
+    int max_idx = 0;
+    float max_val = row[0];
+    
+    for (int i = 1; i < num_classes; i++) {
+        if (row[i] > max_val) {
+            max_val = row[i];
+            max_idx = i;
+        }
+    }
+    
+    output[idx] = max_idx;
+}
+
+//=============================================================================
+// NeuralNetwork Implementation
+//=============================================================================
+
+// Random seed management
+void NeuralNetwork::set_random_seed(unsigned int seed) {
+    NeuralLayer::set_random_seed(seed);
+}
+
+unsigned int NeuralNetwork::get_time_based_seed() {
+    return NeuralLayer::get_time_based_seed();
+}
+
+// Constructor
+NeuralNetwork::NeuralNetwork(const std::vector<int>& layer_sizes) {
+    if (layer_sizes.size() < 2) {
+        throw std::invalid_argument("Network must have at least 2 layers (input and output)");
+    }
     
     // Create layers
-    for (size_t i = 0; i < layer_sizes.size() - 1; ++i) {
+    for (size_t i = 0; i < layer_sizes.size() - 1; i++) {
         int input_size = layer_sizes[i];
         int output_size = layer_sizes[i + 1];
+        bool use_relu = (i < layer_sizes.size() - 2);  // ReLU for all except last layer
         
-        // All layers except the last have ReLU activation
-        bool has_activation = (i < layer_sizes.size() - 2);
-        
-        NeuralLayer* layer = new NeuralLayer(input_size, output_size, has_activation);
-        layers_.push_back(layer);
-        
-        printf("Created layer %zu: %d -> %d (activation: %s)\n", 
-               i, input_size, output_size, has_activation ? "ReLU" : "none");
+        layers_.push_back(new NeuralLayer(input_size, output_size, use_relu));
     }
     
-    // Setup device memory for intermediate computations
-    setup_device_memory();
-    
-    // Setup cuTensor operations for softmax and cross-entropy
-    setup_cutensor_softmax_operations();
-    
-    printf("Neural network created with %zu layers\n", layers_.size());
+    // Allocate device memory for intermediate outputs and gradients
+    // We need one output buffer per layer (including input as layer 0 output)
+    // and one gradient buffer per layer (excluding input)
+    for (size_t i = 0; i < layer_sizes.size(); i++) {
+        // Outputs: allocate for max batch size (we'll use dynamic allocation based on actual batch size)
+        layer_outputs_.push_back(nullptr);
+        
+        if (i > 0) {
+            // Gradients: only for layers after input
+            layer_gradients_.push_back(nullptr);
+        }
+    }
 }
 
+// Destructor
 NeuralNetwork::~NeuralNetwork() {
-    // Cleanup cuTensor softmax operations
-    cleanup_cutensor_softmax_operations();
-    
-    // Cleanup device memory
-    cleanup_device_memory();
-    
-    // Delete layers
-    for (NeuralLayer* layer : layers_) {
+    // Delete all layers
+    for (auto layer : layers_) {
         delete layer;
     }
-    layers_.clear();
     
-    // Destroy cuTensor handle
-    if (cutensor_handle_) cutensorDestroy(cutensor_handle_);
-    
-    // Destroy CUDA stream
-    if (stream_) cudaStreamDestroy(stream_);
-    
-    printf("Neural network destroyed\n");
-}
-
-void NeuralNetwork::setup_device_memory() {
-    // Allocate device memory for layer outputs
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        int output_size = layers_[i]->get_output_elements();
-        
-        float* output_d;
-        HANDLE_CUDA_ERROR(cudaMalloc(&output_d, output_size * sizeof(float)));
-        layer_outputs_.push_back(output_d);
-        
-        float* gradient_d;
-        HANDLE_CUDA_ERROR(cudaMalloc(&gradient_d, output_size * sizeof(float)));
-        layer_gradients_.push_back(gradient_d);
+    // Free device memory for outputs
+    for (auto output : layer_outputs_) {
+        if (output) {
+            cudaFree(output);
+        }
     }
     
-    // Allocate memory for final layer softmax output and loss gradient
-    int final_output_size = layers_.back()->get_output_elements();
-    HANDLE_CUDA_ERROR(cudaMalloc(&softmax_output_d_, final_output_size * sizeof(float)));
-    HANDLE_CUDA_ERROR(cudaMalloc(&loss_gradient_d_, final_output_size * sizeof(float)));
-    
-    // Allocate temporary storage for cuTensor softmax operations
-    HANDLE_CUDA_ERROR(cudaMalloc(&temp_storage_d_, final_output_size * sizeof(float)));
-    HANDLE_CUDA_ERROR(cudaMalloc(&max_values_d_, sizeof(float)));  // Single max value
-    HANDLE_CUDA_ERROR(cudaMalloc(&sum_exp_d_, sizeof(float)));     // Single sum value
-    
-    printf("Device memory allocated for %zu layers\n", layers_.size());
-}
-
-void NeuralNetwork::cleanup_device_memory() {
-    // Free layer outputs and gradients
-    for (float* ptr : layer_outputs_) {
-        if (ptr) cudaFree(ptr);
-    }
-    layer_outputs_.clear();
-    
-    for (float* ptr : layer_gradients_) {
-        if (ptr) cudaFree(ptr);
-    }
-    layer_gradients_.clear();
-    
-    // Free softmax and loss memory
-    if (softmax_output_d_) cudaFree(softmax_output_d_);
-    if (loss_gradient_d_) cudaFree(loss_gradient_d_);
-    if (temp_storage_d_) cudaFree(temp_storage_d_);
-    if (max_values_d_) cudaFree(max_values_d_);
-    if (sum_exp_d_) cudaFree(sum_exp_d_);
-    if (cutensor_workspace_d_) cudaFree(cutensor_workspace_d_);
-}
-
-void NeuralNetwork::setup_cutensor_softmax_operations() {
-    const uint32_t kAlignment = 128;
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    
-    int final_output_size = layers_.back()->get_output_elements();
-    
-    // Create tensor descriptors for softmax operations
-    std::vector<int64_t> extent = {static_cast<int64_t>(final_output_size)};
-    std::vector<int> mode = {'i'};
-    
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
-        cutensor_handle_, &softmax_input_desc_, 1, extent.data(), nullptr, dataType, kAlignment));
-    
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
-        cutensor_handle_, &softmax_output_desc_, 1, extent.data(), nullptr, dataType, kAlignment));
-    
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(
-        cutensor_handle_, &target_desc_, 1, extent.data(), nullptr, dataType, kAlignment));
-    
-    // For now, we'll implement a simplified approach using cuTensor elementwise operations
-    // The actual softmax implementation will use hybrid CUDA kernels + cuTensor reductions
-    // This is because cuTensor doesn't directly support exp/log operations in all versions
-}
-
-void NeuralNetwork::cleanup_cutensor_softmax_operations() {
-    // Cleanup tensor descriptors
-    if (softmax_input_desc_) cutensorDestroyTensorDescriptor(softmax_input_desc_);
-    if (softmax_output_desc_) cutensorDestroyTensorDescriptor(softmax_output_desc_);
-    if (target_desc_) cutensorDestroyTensorDescriptor(target_desc_);
-}
-
-// Enhanced CUDA kernels for cuTensor-based softmax
-__global__ void subtract_max_and_exp_kernel(const float* input, float* output, float max_val, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        output[idx] = expf(input[idx] - max_val);
+    // Free device memory for gradients
+    for (auto gradient : layer_gradients_) {
+        if (gradient) {
+            cudaFree(gradient);
+        }
     }
 }
 
-__global__ void divide_by_sum_kernel(float* data, float sum_val, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        data[idx] /= sum_val;
-    }
-}
-
-__global__ void element_log_kernel(const float* input, float* output, int size) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < size) {
-        float epsilon = 1e-7f;
-        output[idx] = logf(fmaxf(input[idx], epsilon));
-    }
-}
-
-void NeuralNetwork::apply_softmax_cutensor(const float* input, float* output, int size) {
-    const uint32_t kAlignment = 128;
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    // Step 1: Find maximum using cuTENSOR reduction
-    printf("Step 1: Finding maximum using cuTENSOR reduction...\n");
-    
-    // Create tensor descriptors
-    std::vector<int64_t> extentInput = {static_cast<int64_t>(size)};
-    std::vector<int> modeInput = {'i'};
-    std::vector<int32_t> modeInputInt = {'i'};
-    
-    std::vector<int64_t> extentScalar = {};  // Empty for scalar
-    std::vector<int32_t> modeScalarInt = {}; // Empty for scalar
-    
-    cutensorTensorDescriptor_t descInput, descMax;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descInput, 1, extentInput.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descMax, 0, nullptr, nullptr, dataType, kAlignment));  // Scalar
-    
-    // Create reduction operation for finding max
-    cutensorOperationDescriptor_t descReduction;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateReduction(cutensor_handle_, &descReduction,
-        descInput, modeInputInt.data(), CUTENSOR_OP_IDENTITY,
-        descMax, modeScalarInt.data(), CUTENSOR_OP_IDENTITY,
-        descMax, modeScalarInt.data(),
-        CUTENSOR_OP_MAX, descCompute));
-    
-    // Create plan and workspace
-    cutensorPlanPreference_t planPref;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPref, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSize = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descReduction, planPref, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSize));
-    
-    cutensorPlan_t planReduction;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planReduction, descReduction, planPref, workspaceSize));
-    
-    void* workspace = nullptr;
-    if (workspaceSize > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspace, workspaceSize));
+// Forward pass
+float NeuralNetwork::forward_batch(const float* input_batch, const float* target_batch, int batch_size) {
+    // Ensure we have allocated buffers for this batch size
+    // Calculate sizes for each layer
+    std::vector<int> layer_sizes;
+    layer_sizes.push_back(layers_[0]->get_input_elements());  // Input size
+    for (auto layer : layers_) {
+        layer_sizes.push_back(layer->get_output_elements());
     }
     
-    // Initialize max to negative infinity
-    float neg_inf = -std::numeric_limits<float>::infinity();
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(max_values_d_, &neg_inf, sizeof(float), cudaMemcpyHostToDevice, stream_));
-    
-    // Execute reduction to find max
-    float alpha = 1.0f, beta = 0.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorReduce(cutensor_handle_, planReduction,
-        &alpha, input, &beta, max_values_d_, max_values_d_, workspace, workspaceSize, stream_));
-    
-    // Step 2: Manually broadcast max to full tensor, then subtract using cuTENSOR elementwise binary
-    printf("Step 2: Manually broadcasting max and subtracting using cuTENSOR elementwise binary...\n");
-    
-    // Create max broadcast tensor
-    float* max_broadcast_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&max_broadcast_d, size * sizeof(float)));
-    
-    // Copy max value to host, then broadcast to device tensor
-    float max_value_h;
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(&max_value_h, max_values_d_, sizeof(float), cudaMemcpyDeviceToHost, stream_));
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_)); // Wait for copy to complete
-    
-    // Fill broadcast tensor with max value using a simple loop on device
-    dim3 blockSize(256);
-    dim3 gridSize((size + blockSize.x - 1) / blockSize.x);
-    
-    // Launch kernel to fill the tensor with max value
-    fill_tensor_kernel<<<gridSize, blockSize, 0, stream_>>>(max_broadcast_d, max_value_h, size);
-    
-    // Create tensor descriptor for max broadcast
-    cutensorTensorDescriptor_t descMaxBroadcast;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descMaxBroadcast, 1, extentInput.data(), nullptr, dataType, kAlignment));
-    
-    // Create elementwise binary operation for subtraction: output = input - max_broadcast
-    cutensorOperationDescriptor_t descSubtract;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseBinary(cutensor_handle_, &descSubtract,
-        descInput, modeInputInt.data(), CUTENSOR_OP_IDENTITY,        // input tensor
-        descMaxBroadcast, modeInputInt.data(), CUTENSOR_OP_IDENTITY, // max broadcast tensor
-        descInput, modeInputInt.data(),                              // output tensor
-        CUTENSOR_OP_ADD, descCompute));                              // Use ADD with negative gamma for subtraction
-    
-    cutensorPlanPreference_t planPrefSubtract;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefSubtract, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeSubtract = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descSubtract, planPrefSubtract, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeSubtract));
-    
-    cutensorPlan_t planSubtract;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planSubtract, descSubtract, planPrefSubtract, workspaceSizeSubtract));
-    
-    void* workspaceSubtract = nullptr;
-    if (workspaceSizeSubtract > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceSubtract, workspaceSizeSubtract));
+    // Allocate/reallocate output buffers as needed
+    for (size_t i = 0; i < layer_outputs_.size(); i++) {
+        size_t size = batch_size * layer_sizes[i] * sizeof(float);
+        if (!layer_outputs_[i]) {
+            HANDLE_CUDA_ERROR(cudaMalloc(&layer_outputs_[i], size));
+        }
     }
     
-    // Execute subtraction: output = 1.0 * input + (-1.0) * max_broadcast
-    float gamma = -1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorElementwiseBinaryExecute(cutensor_handle_, planSubtract,
-        &alpha, input, &gamma, max_broadcast_d, output, stream_));
+    // Copy input to first output buffer
+    size_t input_size = batch_size * layer_sizes[0] * sizeof(float);
+    HANDLE_CUDA_ERROR(cudaMemcpy(layer_outputs_[0], input_batch, input_size, cudaMemcpyDeviceToDevice));
     
-    // Step 3: Apply exp using cuTENSOR unary operation with CUTENSOR_OP_EXP
-    printf("Step 3: Applying exp using cuTENSOR unary operation CUTENSOR_OP_EXP...\n");
-    
-    // Create unary operation for exp: output = exp(input)
-    cutensorOperationDescriptor_t descExp;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePermutation(cutensor_handle_, &descExp,
-        descInput, modeInputInt.data(), CUTENSOR_OP_EXP,    // Apply exp to input
-        descInput, modeInputInt.data(),                     // Output tensor (reuse input descriptor)
-        descCompute));
-    
-    cutensorPlanPreference_t planPrefExp;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefExp, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeExp = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descExp, planPrefExp, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeExp));
-    
-    cutensorPlan_t planExp;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planExp, descExp, planPrefExp, workspaceSizeExp));
-    
-    void* workspaceExp = nullptr;
-    if (workspaceSizeExp > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceExp, workspaceSizeExp));
+    // Forward pass through all layers
+    for (size_t i = 0; i < layers_.size(); i++) {
+        layers_[i]->forward_batch(layer_outputs_[i], layer_outputs_[i + 1], batch_size);
     }
     
-    // Execute exp operation: output = exp(output)
-    HANDLE_CUTENSOR_ERROR(cutensorPermute(cutensor_handle_, planExp,
-        &alpha, output,    // Input (result of subtraction)
-        output,            // Output (overwrite with exp values)
-        stream_));
-    
-    // Cleanup exp operation
-    if (workspaceExp) HANDLE_CUDA_ERROR(cudaFree(workspaceExp));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planExp));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descExp));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefExp));
-    
-   // Step 4: Sum exp values using cuTENSOR reduction
-    printf("Step 4: Summing exp values using cuTENSOR reduction...\n");
-    
-    // Reuse reduction operation but with SUM instead of MAX
-    cutensorOperationDescriptor_t descSum;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateReduction(cutensor_handle_, &descSum,
-        descInput, modeInputInt.data(), CUTENSOR_OP_IDENTITY,
-        descMax, modeScalarInt.data(), CUTENSOR_OP_IDENTITY,
-        descMax, modeScalarInt.data(),
-        CUTENSOR_OP_ADD, descCompute));  // SUM operation
-    
-    cutensorPlan_t planSum;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planSum, descSum, planPref, workspaceSize));
-    
-    // Initialize sum to zero
-    float zero = 0.0f;
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(sum_exp_d_, &zero, sizeof(float), cudaMemcpyHostToDevice, stream_));
-    
-    // Execute sum reduction
-    HANDLE_CUTENSOR_ERROR(cutensorReduce(cutensor_handle_, planSum,
-        &alpha, output, &beta, sum_exp_d_, sum_exp_d_, workspace, workspaceSize, stream_));
-
-   
-    // Step 5a: Get sum value from GPU and compute reciprocal on host
-    printf("Step 5a: Getting sum value from GPU and computing reciprocal...\n");
-    
-    // Copy sum value from device to host
-    float sum_value_h;
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(&sum_value_h, sum_exp_d_, sizeof(float), cudaMemcpyDeviceToHost, stream_));
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_)); // Wait for copy to complete
-    
-    // Compute reciprocal on host
-    float reciprocal_alpha = 1.0f / sum_value_h;
-    // Create identity permutation operation to multiply by reciprocal alpha
-    cutensorOperationDescriptor_t descReciprocal;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePermutation(cutensor_handle_, &descReciprocal,
-        descMax, modeScalarInt.data(), CUTENSOR_OP_IDENTITY,  // Input scalar
-        descMax, modeScalarInt.data(),                        // Output scalar  
-        descCompute));
-    
-    cutensorPlanPreference_t planPrefReciprocal;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefReciprocal, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeReciprocal = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descReciprocal, planPrefReciprocal, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeReciprocal));
-    
-    cutensorPlan_t planReciprocal;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planReciprocal, descReciprocal, planPrefReciprocal, workspaceSizeReciprocal));
-    
-    void* workspaceReciprocal = nullptr;
-    if (workspaceSizeReciprocal > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceReciprocal, workspaceSizeReciprocal));
-    }
-    
-    // Execute permutation with reciprocal as alpha: output = reciprocal_alpha * input
-    HANDLE_CUTENSOR_ERROR(cutensorPermute(cutensor_handle_, planReciprocal,
-        &reciprocal_alpha, output,  // Input sum, alpha = 1/sum
-        output,                     // Output reciprocal (overwrite)
-        stream_));
-
-    // Cleanup reciprocal operation
-    if (workspaceReciprocal) HANDLE_CUDA_ERROR(cudaFree(workspaceReciprocal));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planReciprocal));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descReciprocal));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefReciprocal));
-    
-    // Cleanup broadcast tensors
-    HANDLE_CUDA_ERROR(cudaFree(max_broadcast_d));
-    
-    // Cleanup workspace and other resources
-    if (workspace) HANDLE_CUDA_ERROR(cudaFree(workspace));
-    if (workspaceSubtract) HANDLE_CUDA_ERROR(cudaFree(workspaceSubtract));
-    
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planReduction));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planSubtract));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planSum));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descReduction));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descSubtract));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descSum));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descInput));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descMax));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descMaxBroadcast));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPref));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefSubtract));
-    
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-}
-
-void NeuralNetwork::apply_softmax_batch_cutensor(const float* input_batch, float* output_batch, int batch_size, int size) {
-    const uint32_t kAlignment = 128;
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    printf("Batch Softmax Step 1: Finding maximum across feature dimension for each batch item...\n");
-    
-    // For batch processing, we need to apply softmax along the feature dimension (size) for each batch item
-    // Input: (batch_size, size), Output: (batch_size, size)
-    // We need to find max, subtract, exp, sum, and divide for each batch item
-    
-    // Create tensor descriptors for batch operations
-    std::vector<int64_t> extentInputBatch = {static_cast<int64_t>(batch_size), static_cast<int64_t>(size)};
-    std::vector<int32_t> modeInputBatch = {'b', 'i'};  // batch, feature
-    
-    std::vector<int64_t> extentMaxBatch = {static_cast<int64_t>(batch_size)};  // Max per batch item
-    std::vector<int32_t> modeMaxBatch = {'b'};
-    
-    cutensorTensorDescriptor_t descInputBatch, descMaxBatch;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descInputBatch, 2, extentInputBatch.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descMaxBatch, 1, extentMaxBatch.data(), nullptr, dataType, kAlignment));
-    
-    // Create reduction operation for finding max along feature dimension (reduce 'i', keep 'b')
-    cutensorOperationDescriptor_t descReductionMax;
-    std::vector<int32_t> modeMaxOutput = {'b'};
-    HANDLE_CUTENSOR_ERROR(cutensorCreateReduction(cutensor_handle_, &descReductionMax,
-        descInputBatch, modeInputBatch.data(), CUTENSOR_OP_IDENTITY,    // input[b,i]
-        descMaxBatch, modeMaxOutput.data(), CUTENSOR_OP_IDENTITY,       // max[b] (initial values)
-        descMaxBatch, modeMaxOutput.data(),                             // max[b] (output)
-        CUTENSOR_OP_MAX, descCompute));                                 // MAX reduction along 'i'
-    
-    // Create plan and workspace for max reduction
-    cutensorPlanPreference_t planPref;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPref, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSize = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descReductionMax, planPref, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSize));
-    
-    cutensorPlan_t planReductionMax;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planReductionMax, descReductionMax, planPref, workspaceSize));
-    
-    void* workspace = nullptr;
-    if (workspaceSize > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspace, workspaceSize));
-    }
-    
-    // Allocate memory for max values per batch item
-    float* max_values_batch_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&max_values_batch_d, batch_size * sizeof(float)));
-    
-    // Initialize max values to negative infinity
-    float neg_inf = -std::numeric_limits<float>::infinity();
-    std::vector<float> neg_inf_vec(batch_size, neg_inf);
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(max_values_batch_d, neg_inf_vec.data(), batch_size * sizeof(float), cudaMemcpyHostToDevice, stream_));
-    
-    // Execute reduction to find max along feature dimension for each batch item
-    float alpha = 1.0f, beta = 0.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorReduce(cutensor_handle_, planReductionMax,
-        &alpha, input_batch, &beta, max_values_batch_d, max_values_batch_d, workspace, workspaceSize, stream_));
-    
-    printf("Batch Softmax Step 2: Broadcasting max values and subtracting...\n");
-    
-    // Create broadcast max tensor: (batch_size, size) where each row contains the max for that batch
-    float* max_broadcast_batch_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&max_broadcast_batch_d, batch_size * size * sizeof(float)));
-    
-    // Create kernel to broadcast max values: max_broadcast[b,i] = max_values[b]
-    dim3 blockSize(256);
-    dim3 gridSize((batch_size * size + blockSize.x - 1) / blockSize.x);
-    broadcast_batch_kernel<<<gridSize, blockSize, 0, stream_>>>(
-        max_values_batch_d, max_broadcast_batch_d, batch_size, size);
-    
-    // Create elementwise binary operation for subtraction: output_batch = input_batch - max_broadcast_batch
-    cutensorOperationDescriptor_t descSubtract;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseBinary(cutensor_handle_, &descSubtract,
-        descInputBatch, modeInputBatch.data(), CUTENSOR_OP_IDENTITY,      // input_batch[b,i]
-        descInputBatch, modeInputBatch.data(), CUTENSOR_OP_IDENTITY,      // max_broadcast_batch[b,i]
-        descInputBatch, modeInputBatch.data(),                            // output[b,i]
-        CUTENSOR_OP_ADD, descCompute));                                   // Use ADD with negative gamma for subtraction
-    
-    cutensorPlanPreference_t planPrefSubtract;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefSubtract, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeSubtract = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descSubtract, planPrefSubtract, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeSubtract));
-    
-    cutensorPlan_t planSubtract;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planSubtract, descSubtract, planPrefSubtract, workspaceSizeSubtract));
-    
-    void* workspaceSubtract = nullptr;
-    if (workspaceSizeSubtract > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceSubtract, workspaceSizeSubtract));
-    }
-    
-    // Execute subtraction: output_batch = 1.0 * input_batch + (-1.0) * max_broadcast_batch
-    float gamma = -1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorElementwiseBinaryExecute(cutensor_handle_, planSubtract,
-        &alpha, input_batch, &gamma, max_broadcast_batch_d, output_batch, stream_));
-    
-    printf("Batch Softmax Step 3: Applying exp using cuTENSOR unary operation...\n");
-    
-    // Apply exp using cuTensor unary operation
-    cutensorOperationDescriptor_t descExp;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePermutation(cutensor_handle_, &descExp,
-        descInputBatch, modeInputBatch.data(), CUTENSOR_OP_EXP,    // Apply exp to input
-        descInputBatch, modeInputBatch.data(),                     // Output tensor (same shape)
-        descCompute));
-    
-    cutensorPlanPreference_t planPrefExp;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefExp, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeExp = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descExp, planPrefExp, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeExp));
-    
-    cutensorPlan_t planExp;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planExp, descExp, planPrefExp, workspaceSizeExp));
-    
-    void* workspaceExp = nullptr;
-    if (workspaceSizeExp > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceExp, workspaceSizeExp));
-    }
-    
-    // Execute exp operation: output_batch = exp(output_batch)
-    HANDLE_CUTENSOR_ERROR(cutensorPermute(cutensor_handle_, planExp,
-        &alpha, output_batch,    // Input (result of subtraction)
-        output_batch,            // Output (overwrite with exp values)
-        stream_));
-    
-    printf("Batch Softmax Step 4: Summing exp values across feature dimension...\n");
-    
-    // Sum exp values along feature dimension for each batch item
-    cutensorOperationDescriptor_t descSum;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateReduction(cutensor_handle_, &descSum,
-        descInputBatch, modeInputBatch.data(), CUTENSOR_OP_IDENTITY,      // input[b,i]
-        descMaxBatch, modeMaxOutput.data(), CUTENSOR_OP_IDENTITY,         // sum[b] (initial)
-        descMaxBatch, modeMaxOutput.data(),                               // sum[b] (output)
-        CUTENSOR_OP_ADD, descCompute));                                   // SUM reduction along 'i'
-    
-    cutensorPlan_t planSum;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planSum, descSum, planPref, workspaceSize));
-    
-    // Allocate memory for sum values per batch item
-    float* sum_exp_batch_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&sum_exp_batch_d, batch_size * sizeof(float)));
-    
-    // Initialize sum to zero
-    HANDLE_CUDA_ERROR(cudaMemset(sum_exp_batch_d, 0, batch_size * sizeof(float)));
-    
-    // Execute sum reduction
-    HANDLE_CUTENSOR_ERROR(cutensorReduce(cutensor_handle_, planSum,
-        &alpha, output_batch, &beta, sum_exp_batch_d, sum_exp_batch_d, workspace, workspaceSize, stream_));
-    
-    printf("Batch Softmax Step 5: Computing final division...\n");
-    
-    // Create broadcast sum tensor and divide
-    float* sum_broadcast_batch_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&sum_broadcast_batch_d, batch_size * size * sizeof(float)));
-    
-    // Broadcast sum values: sum_broadcast[b,i] = sum_values[b]
-    broadcast_batch_kernel<<<gridSize, blockSize, 0, stream_>>>(
-        sum_exp_batch_d, sum_broadcast_batch_d, batch_size, size);
-    
-    // Use elementwise division: output_batch = output_batch / sum_broadcast_batch
-    // Since cuTensor doesn't have direct division, we'll use a kernel
-    divide_batch_kernel<<<gridSize, blockSize, 0, stream_>>>(
-        output_batch, sum_broadcast_batch_d, batch_size, size);
-    
-    // Cleanup
-    HANDLE_CUDA_ERROR(cudaFree(max_values_batch_d));
-    HANDLE_CUDA_ERROR(cudaFree(max_broadcast_batch_d));
-    HANDLE_CUDA_ERROR(cudaFree(sum_exp_batch_d));
-    HANDLE_CUDA_ERROR(cudaFree(sum_broadcast_batch_d));
-    
-    if (workspace) HANDLE_CUDA_ERROR(cudaFree(workspace));
-    if (workspaceSubtract) HANDLE_CUDA_ERROR(cudaFree(workspaceSubtract));
-    if (workspaceExp) HANDLE_CUDA_ERROR(cudaFree(workspaceExp));
-    
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planReductionMax));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planSubtract));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planExp));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planSum));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descReductionMax));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descSubtract));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descExp));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descSum));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descInputBatch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descMaxBatch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPref));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefSubtract));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefExp));
-    
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-}
-
-float NeuralNetwork::compute_cross_entropy_loss_cutensor(const float* softmax_output, const float* target, int size) {
-    const uint32_t kAlignment = 128;
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    // Step 1: Compute log(softmax_output) using cuTENSOR unary operation with CUTENSOR_OP_LOG
-    printf("Step 1: Computing log(softmax_output) using cuTENSOR unary operation CUTENSOR_OP_LOG...\n");
-    
-    // Create tensor descriptors
-    std::vector<int64_t> extentInput = {static_cast<int64_t>(size)};
-    std::vector<int32_t> modeInputInt = {'i'};
-    
-    cutensorTensorDescriptor_t descSoftmaxInput;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descSoftmaxInput, 1, extentInput.data(), nullptr, dataType, kAlignment));
-    
-    // Create unary operation for log: log_output = log(softmax_output)
-    cutensorOperationDescriptor_t descLog;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePermutation(cutensor_handle_, &descLog,
-        descSoftmaxInput, modeInputInt.data(), CUTENSOR_OP_LOG,  // Apply log to softmax
-        descSoftmaxInput, modeInputInt.data(),                   // Output tensor (same size)
-        descCompute));
-    
-    cutensorPlanPreference_t planPrefLog;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefLog, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeLog = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descLog, planPrefLog, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeLog));
-    
-    cutensorPlan_t planLog;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planLog, descLog, planPrefLog, workspaceSizeLog));
-    
-    void* workspaceLog = nullptr;
-    if (workspaceSizeLog > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceLog, workspaceSizeLog));
-    }
-    
-    // Copy softmax output to temp storage and add epsilon to avoid log(0)
-    // First copy softmax_output to temp_storage_d_
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(temp_storage_d_, softmax_output, size * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
-    
-    // Add epsilon to temp storage
-    float epsilon = 1e-7f;
-    dim3 blockSize(256);
-    dim3 gridSize((size + blockSize.x - 1) / blockSize.x);
-    add_epsilon_kernel<<<gridSize, blockSize, 0, stream_>>>(temp_storage_d_, size, epsilon);
-    
-    // Execute log operation: temp_storage = log(temp_storage + epsilon)
-    float alpha_log = 1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorPermute(cutensor_handle_, planLog,
-        &alpha_log, temp_storage_d_,  // Input softmax with epsilon added
-        temp_storage_d_,              // Output log values (overwrite)
-        stream_));
-    
-    // Cleanup log operation
-    if (workspaceLog) HANDLE_CUDA_ERROR(cudaFree(workspaceLog));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planLog));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descLog));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descSoftmaxInput));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefLog));
-    
-    // Step 2: Element-wise multiply log(softmax) with target using cuTENSOR
-    printf("Step 2: Element-wise multiply with target using cuTENSOR...\n");
-    
-    // Create tensor descriptors for cross-entropy
-    std::vector<int64_t> extentCrossEntropy = {static_cast<int64_t>(size)};
-    std::vector<int32_t> modeCrossEntropyInt = {'i'};
-    
-    cutensorTensorDescriptor_t descLogSoftmax, descTarget, descProduct;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descLogSoftmax, 1, extentCrossEntropy.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descTarget, 1, extentCrossEntropy.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descProduct, 1, extentCrossEntropy.data(), nullptr, dataType, kAlignment));
-    
-    // Create element-wise binary operation: product = log_softmax * target
-    cutensorOperationDescriptor_t descMultiply;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseBinary(cutensor_handle_, &descMultiply,
-        descLogSoftmax, modeCrossEntropyInt.data(), CUTENSOR_OP_IDENTITY,  // log(softmax)
-        descTarget, modeCrossEntropyInt.data(), CUTENSOR_OP_IDENTITY,      // target
-        descProduct, modeCrossEntropyInt.data(),                           // output
-        CUTENSOR_OP_MUL, descCompute));                                    // Multiplication
-    
-    // Create plan for multiplication
-    cutensorPlanPreference_t planPrefMultiply;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefMultiply, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeMultiply = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descMultiply, planPrefMultiply, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeMultiply));
-    
-    cutensorPlan_t planMultiply;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planMultiply, descMultiply, planPrefMultiply, workspaceSizeMultiply));
-    
-    void* workspaceMultiply = nullptr;
-    if (workspaceSizeMultiply > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceMultiply, workspaceSizeMultiply));
-    }
-    
-    // Allocate memory for product
-    float* product_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&product_d, size * sizeof(float)));
-    
-    // Execute multiplication: product = 1.0 * log_softmax * 1.0 * target
-    float alpha = 1.0f, gamma = 1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorElementwiseBinaryExecute(cutensor_handle_, planMultiply,
-        &alpha, temp_storage_d_,  // log(softmax)
-        &gamma, target,           // target
-        product_d,                // output
-        stream_));
-    
-    // Step 3: Sum the products using cuTENSOR reduction
-    printf("Step 3: Summing products using cuTENSOR reduction...\n");
-    
-    // Create scalar tensor descriptor for sum result
-    cutensorTensorDescriptor_t descSum;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descSum, 0, nullptr, nullptr, dataType, kAlignment));
-    
-    // Create reduction operation: sum = reduce_add(product)
-    cutensorOperationDescriptor_t descReduction;
-    std::vector<int32_t> modeScalarInt = {}; // Empty for scalar
-    HANDLE_CUTENSOR_ERROR(cutensorCreateReduction(cutensor_handle_, &descReduction,
-        descProduct, modeCrossEntropyInt.data(), CUTENSOR_OP_IDENTITY,   // input product
-        descSum, modeScalarInt.data(), CUTENSOR_OP_IDENTITY,             // dummy
-        descSum, modeScalarInt.data(),                                   // output sum
-        CUTENSOR_OP_ADD, descCompute));                                  // SUM operation
-    
-    // Create plan for reduction
-    cutensorPlanPreference_t planPrefReduction;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefReduction, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeReduction = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descReduction, planPrefReduction, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeReduction));
-    
-    cutensorPlan_t planReduction;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planReduction, descReduction, planPrefReduction, workspaceSizeReduction));
-    
-    void* workspaceReduction = nullptr;
-    if (workspaceSizeReduction > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceReduction, workspaceSizeReduction));
-    }
-    
-    // Allocate memory for loss
-    float* loss_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&loss_d, sizeof(float)));
-    
-    // Initialize sum to zero
-    float zero = 0.0f;
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(loss_d, &zero, sizeof(float), cudaMemcpyHostToDevice, stream_));
-    
-    // Execute reduction
-    float beta = 0.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorReduce(cutensor_handle_, planReduction,
-        &alpha, product_d, &beta, loss_d, loss_d, workspaceReduction, workspaceSizeReduction, stream_));
-    
-    // Step 4: Negate the result using cuTENSOR element-wise binary: result = 0 - value
-    printf("Step 4: Negating result using cuTENSOR element-wise binary...\n");
-    
-    // Create zero scalar
-    float* zero_scalar_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&zero_scalar_d, sizeof(float)));
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(zero_scalar_d, &zero, sizeof(float), cudaMemcpyHostToDevice, stream_));
-    
-    // Create element-wise binary for negation: negated = 0 - loss
-    cutensorOperationDescriptor_t descNegate;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseBinary(cutensor_handle_, &descNegate,
-        descSum, modeScalarInt.data(), CUTENSOR_OP_IDENTITY,     // zero scalar
-        descSum, modeScalarInt.data(), CUTENSOR_OP_IDENTITY,     // loss scalar  
-        descSum, modeScalarInt.data(),                           // output
-        CUTENSOR_OP_ADD, descCompute));                          // 0 + (-1) * loss
-    
-    cutensorPlanPreference_t planPrefNegate;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefNegate, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeNegate = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descNegate, planPrefNegate, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeNegate));
-    
-    cutensorPlan_t planNegate;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planNegate, descNegate, planPrefNegate, workspaceSizeNegate));
-    
-    void* workspaceNegate = nullptr;
-    if (workspaceSizeNegate > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceNegate, workspaceSizeNegate));
-    }
-    
-    // Execute negation: result = 1.0 * 0 + (-1.0) * loss = -loss
-    float alpha_negate = 1.0f, gamma_negate = -1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorElementwiseBinaryExecute(cutensor_handle_, planNegate,
-        &alpha_negate, zero_scalar_d,   // 0
-        &gamma_negate, loss_d,          // -1 * loss
-        loss_d,                         // output (overwrite loss_d)
-        stream_));
-    
-    // Cleanup negation resources
-    HANDLE_CUDA_ERROR(cudaFree(zero_scalar_d));
-    if (workspaceNegate) HANDLE_CUDA_ERROR(cudaFree(workspaceNegate));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planNegate));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descNegate));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefNegate));
-    
-    // Copy loss to host
-    float loss;
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(&loss, loss_d, sizeof(float), cudaMemcpyDeviceToHost, stream_));
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-    
-    // Cleanup
-    HANDLE_CUDA_ERROR(cudaFree(product_d));
-    HANDLE_CUDA_ERROR(cudaFree(loss_d));
-    if (workspaceMultiply) HANDLE_CUDA_ERROR(cudaFree(workspaceMultiply));
-    if (workspaceReduction) HANDLE_CUDA_ERROR(cudaFree(workspaceReduction));
-    
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planMultiply));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planReduction));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descMultiply));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descReduction));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descLogSoftmax));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descTarget));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descProduct));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descSum));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefMultiply));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefReduction));
-    
-    return loss;
-}
-
-void NeuralNetwork::compute_cross_entropy_gradient_cutensor(const float* softmax_output, const float* target, float* gradient, int size) {
-    const uint32_t kAlignment = 128;
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    // Cross-entropy gradient is simply: softmax_output - target
-    // This is perfect for cuTENSOR element-wise binary subtraction
-    
-    // Create tensor descriptors for gradient computation
-    std::vector<int64_t> extentGradient = {static_cast<int64_t>(size)};
-    std::vector<int32_t> modeGradientInt = {'i'};
-    
-    cutensorTensorDescriptor_t descSoftmax, descTarget, descGradient;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descSoftmax, 1, extentGradient.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descTarget, 1, extentGradient.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descGradient, 1, extentGradient.data(), nullptr, dataType, kAlignment));
-    
-    // Create element-wise binary operation: gradient = softmax_output - target
-    cutensorOperationDescriptor_t descSubtractGrad;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseBinary(cutensor_handle_, &descSubtractGrad,
-        descSoftmax, modeGradientInt.data(), CUTENSOR_OP_IDENTITY,    // softmax_output
-        descTarget, modeGradientInt.data(), CUTENSOR_OP_IDENTITY,     // target
-        descGradient, modeGradientInt.data(),                         // output gradient
-        CUTENSOR_OP_ADD, descCompute));                               // Will use gamma=-1.0 for subtraction
-    
-    // Create plan for gradient computation
-    cutensorPlanPreference_t planPrefGrad;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefGrad, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeGrad = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descSubtractGrad, planPrefGrad, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeGrad));
-    
-    cutensorPlan_t planGrad;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planGrad, descSubtractGrad, planPrefGrad, workspaceSizeGrad));
-    
-    void* workspaceGrad = nullptr;
-    if (workspaceSizeGrad > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceGrad, workspaceSizeGrad));
-    }
-    
-    // Execute subtraction: gradient = 1.0 * softmax_output + (-1.0) * target
-    float alpha_grad = 1.0f, gamma_grad = -1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorElementwiseBinaryExecute(cutensor_handle_, planGrad,
-        &alpha_grad, softmax_output,   // softmax_output
-        &gamma_grad, target,           // -1.0 * target
-        gradient,                      // output gradient
-        stream_));
-    
-    // Cleanup
-    if (workspaceGrad) HANDLE_CUDA_ERROR(cudaFree(workspaceGrad));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planGrad));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descSubtractGrad));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descSoftmax));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descTarget));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descGradient));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefGrad));
-    
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-}
-
-float NeuralNetwork::compute_cross_entropy_loss_batch_cutensor(const float* softmax_output_batch, const float* target_batch, int batch_size, int size) {
-    const uint32_t kAlignment = 128;
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    printf("Batch Cross-Entropy Step 1: Computing log(softmax_output_batch)...\n");
-    
-    // Create tensor descriptors for batch operations
-    std::vector<int64_t> extentBatch = {static_cast<int64_t>(batch_size), static_cast<int64_t>(size)};
-    std::vector<int32_t> modeBatch = {'b', 'i'};  // batch, feature
-    
-    cutensorTensorDescriptor_t descSoftmaxBatch, descTargetBatch, descProductBatch;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descSoftmaxBatch, 2, extentBatch.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descTargetBatch, 2, extentBatch.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descProductBatch, 2, extentBatch.data(), nullptr, dataType, kAlignment));
-    
-    // Allocate memory for log(softmax) batch
-    float* log_softmax_batch_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&log_softmax_batch_d, batch_size * size * sizeof(float)));
-    
-    // Copy softmax output to temp storage and add epsilon to avoid log(0)
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(log_softmax_batch_d, softmax_output_batch, batch_size * size * sizeof(float), cudaMemcpyDeviceToDevice, stream_));
-    
-    // Add epsilon to avoid log(0)
-    float epsilon = 1e-7f;
-    dim3 blockSize(256);
-    dim3 gridSize((batch_size * size + blockSize.x - 1) / blockSize.x);
-    add_epsilon_kernel<<<gridSize, blockSize, 0, stream_>>>(log_softmax_batch_d, batch_size * size, epsilon);
-    
-    // Create unary operation for log: log_softmax_batch = log(softmax_batch + epsilon)
-    cutensorOperationDescriptor_t descLog;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePermutation(cutensor_handle_, &descLog,
-        descSoftmaxBatch, modeBatch.data(), CUTENSOR_OP_LOG,  // Apply log to softmax batch
-        descSoftmaxBatch, modeBatch.data(),                   // Output tensor (same shape)
-        descCompute));
-    
-    cutensorPlanPreference_t planPrefLog;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefLog, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeLog = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descLog, planPrefLog, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeLog));
-    
-    cutensorPlan_t planLog;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planLog, descLog, planPrefLog, workspaceSizeLog));
-    
-    void* workspaceLog = nullptr;
-    if (workspaceSizeLog > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceLog, workspaceSizeLog));
-    }
-    
-    // Execute log operation
-    float alpha_log = 1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorPermute(cutensor_handle_, planLog,
-        &alpha_log, log_softmax_batch_d,  // Input softmax batch with epsilon added
-        log_softmax_batch_d,              // Output log values (overwrite)
-        stream_));
-    
-    printf("Batch Cross-Entropy Step 2: Element-wise multiply with target batch...\n");
-    
-    // Create element-wise binary operation: product_batch = log_softmax_batch * target_batch
-    cutensorOperationDescriptor_t descMultiply;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseBinary(cutensor_handle_, &descMultiply,
-        descSoftmaxBatch, modeBatch.data(), CUTENSOR_OP_IDENTITY,      // log(softmax) batch
-        descTargetBatch, modeBatch.data(), CUTENSOR_OP_IDENTITY,       // target batch
-        descProductBatch, modeBatch.data(),                            // output batch
-        CUTENSOR_OP_MUL, descCompute));                                // Multiplication
-    
-    // Create plan for multiplication
-    cutensorPlanPreference_t planPrefMultiply;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefMultiply, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeMultiply = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descMultiply, planPrefMultiply, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeMultiply));
-    
-    cutensorPlan_t planMultiply;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planMultiply, descMultiply, planPrefMultiply, workspaceSizeMultiply));
-    
-    void* workspaceMultiply = nullptr;
-    if (workspaceSizeMultiply > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceMultiply, workspaceSizeMultiply));
-    }
-    
-    // Allocate memory for product batch
-    float* product_batch_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&product_batch_d, batch_size * size * sizeof(float)));
-    
-    // Execute multiplication: product_batch = 1.0 * log_softmax_batch * 1.0 * target_batch
-    float alpha = 1.0f, gamma = 1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorElementwiseBinaryExecute(cutensor_handle_, planMultiply,
-        &alpha, log_softmax_batch_d,     // log(softmax) batch
-        &gamma, target_batch,            // target batch
-        product_batch_d,                 // output batch
-        stream_));
-    
-    printf("Batch Cross-Entropy Step 3: Summing across all elements...\n");
-    
-    // Sum all elements in the product batch to get total loss
-    // We need to reduce across both batch and feature dimensions
-    std::vector<int64_t> extentScalar = {};  // Empty for scalar
-    std::vector<int32_t> modeScalar = {};    // Empty for scalar
-    
-    cutensorTensorDescriptor_t descScalar;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descScalar, 0, nullptr, nullptr, dataType, kAlignment));
-    
-    // Create reduction operation to sum all elements
-    cutensorOperationDescriptor_t descReduction;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateReduction(cutensor_handle_, &descReduction,
-        descProductBatch, modeBatch.data(), CUTENSOR_OP_IDENTITY,      // input product batch
-        descScalar, modeScalar.data(), CUTENSOR_OP_IDENTITY,           // dummy
-        descScalar, modeScalar.data(),                                 // output sum
-        CUTENSOR_OP_ADD, descCompute));                                // SUM operation
-    
-    // Create plan for reduction
-    cutensorPlanPreference_t planPrefReduction;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefReduction, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeReduction = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descReduction, planPrefReduction, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeReduction));
-    
-    cutensorPlan_t planReduction;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planReduction, descReduction, planPrefReduction, workspaceSizeReduction));
-    
-    void* workspaceReduction = nullptr;
-    if (workspaceSizeReduction > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceReduction, workspaceSizeReduction));
-    }
-    
-    // Allocate memory for total loss
-    float* total_loss_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&total_loss_d, sizeof(float)));
-    
-    // Initialize sum to zero
-    float zero = 0.0f;
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(total_loss_d, &zero, sizeof(float), cudaMemcpyHostToDevice, stream_));
-    
-    // Execute reduction
-    float beta = 0.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorReduce(cutensor_handle_, planReduction,
-        &alpha, product_batch_d, &beta, total_loss_d, total_loss_d, workspaceReduction, workspaceSizeReduction, stream_));
-    
-    printf("Batch Cross-Entropy Step 4: Negating and averaging...\n");
-    
-    // Copy total loss to host
+    // Last layer output contains logits - apply softmax for probability
+    int num_classes = layer_sizes.back();
+    float* final_output = layer_outputs_.back();
+    
+    // Create a copy for softmax (to preserve logits for backward pass)
+    float* softmax_output;
+    size_t output_size = batch_size * num_classes * sizeof(float);
+    HANDLE_CUDA_ERROR(cudaMalloc(&softmax_output, output_size));
+    HANDLE_CUDA_ERROR(cudaMemcpy(softmax_output, final_output, output_size, cudaMemcpyDeviceToDevice));
+    
+    // Apply softmax
+    int block_size = 256;
+    int grid_size = (batch_size + block_size - 1) / block_size;
+    softmax_kernel<<<grid_size, block_size>>>(softmax_output, batch_size, num_classes);
+    HANDLE_CUDA_ERROR(cudaGetLastError());
+    
+    // Compute cross-entropy loss
+    float* d_losses;
+    HANDLE_CUDA_ERROR(cudaMalloc(&d_losses, batch_size * sizeof(float)));
+    
+    cross_entropy_loss_kernel<<<grid_size, block_size>>>(softmax_output, target_batch, d_losses, 
+                                                         batch_size, num_classes);
+    HANDLE_CUDA_ERROR(cudaGetLastError());
+    
+    // Reduce to get average loss using cuTENSOR reduction
+    float* d_total_loss;
+    HANDLE_CUDA_ERROR(cudaMalloc(&d_total_loss, sizeof(float)));
+    
+    cutensorHandle_t handle;
+    HANDLE_CUTENSOR_ERROR(cutensorCreate(&handle));
+    
+    std::vector<int64_t> extentA{batch_size};
+    std::vector<int64_t> extentD{};  // Scalar output
+    std::vector<int32_t> modeA{'i'};
+    std::vector<int32_t> modeD{};     // Scalar has no modes
+    
+    cutensor_reduction_wrapper(handle, d_losses, d_total_loss, 
+                              extentA, extentD, modeA, modeD,
+                              CUTENSOR_OP_ADD,  // Sum reduction
+                              1.0f,             // alpha
+                              0.0f,             // beta
+                              0);               // stream
+    
+    // Copy result to host and compute average
     float total_loss;
-    HANDLE_CUDA_ERROR(cudaMemcpyAsync(&total_loss, total_loss_d, sizeof(float), cudaMemcpyDeviceToHost, stream_));
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
-    
-    // Compute average loss over batch and negate
-    float avg_loss = -total_loss / static_cast<float>(batch_size);
+    HANDLE_CUDA_ERROR(cudaMemcpy(&total_loss, d_total_loss, sizeof(float), cudaMemcpyDeviceToHost));
+    float avg_loss = total_loss / batch_size;
     
     // Cleanup
-    HANDLE_CUDA_ERROR(cudaFree(log_softmax_batch_d));
-    HANDLE_CUDA_ERROR(cudaFree(product_batch_d));
-    HANDLE_CUDA_ERROR(cudaFree(total_loss_d));
-    if (workspaceLog) HANDLE_CUDA_ERROR(cudaFree(workspaceLog));
-    if (workspaceMultiply) HANDLE_CUDA_ERROR(cudaFree(workspaceMultiply));
-    if (workspaceReduction) HANDLE_CUDA_ERROR(cudaFree(workspaceReduction));
-    
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planLog));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planMultiply));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planReduction));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descLog));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descMultiply));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descReduction));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descSoftmaxBatch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descTargetBatch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descProductBatch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descScalar));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefLog));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefMultiply));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefReduction));
+    HANDLE_CUDA_ERROR(cudaFree(softmax_output));
+    HANDLE_CUDA_ERROR(cudaFree(d_losses));
+    HANDLE_CUDA_ERROR(cudaFree(d_total_loss));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroy(handle));
     
     return avg_loss;
 }
 
-void NeuralNetwork::compute_cross_entropy_gradient_batch_cutensor(const float* softmax_output_batch, const float* target_batch, float* gradient_batch, int batch_size, int size) {
-    const uint32_t kAlignment = 128;
-    cutensorDataType_t dataType = CUTENSOR_R_32F;
-    cutensorComputeDescriptor_t descCompute = CUTENSOR_COMPUTE_DESC_32F;
-    
-    // Batch cross-entropy gradient is simply: softmax_output_batch - target_batch
-    // This is perfect for cuTENSOR element-wise binary subtraction
-    
-    // Create tensor descriptors for batch gradient computation
-    std::vector<int64_t> extentBatch = {static_cast<int64_t>(batch_size), static_cast<int64_t>(size)};
-    std::vector<int32_t> modeBatch = {'b', 'i'};  // batch, feature
-    
-    cutensorTensorDescriptor_t descSoftmaxBatch, descTargetBatch, descGradientBatch;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descSoftmaxBatch, 2, extentBatch.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descTargetBatch, 2, extentBatch.data(), nullptr, dataType, kAlignment));
-    HANDLE_CUTENSOR_ERROR(cutensorCreateTensorDescriptor(cutensor_handle_, &descGradientBatch, 2, extentBatch.data(), nullptr, dataType, kAlignment));
-    
-    // Create element-wise binary operation: gradient_batch = softmax_output_batch - target_batch
-    cutensorOperationDescriptor_t descSubtractGrad;
-    HANDLE_CUTENSOR_ERROR(cutensorCreateElementwiseBinary(cutensor_handle_, &descSubtractGrad,
-        descSoftmaxBatch, modeBatch.data(), CUTENSOR_OP_IDENTITY,       // softmax_output_batch
-        descTargetBatch, modeBatch.data(), CUTENSOR_OP_IDENTITY,        // target_batch
-        descGradientBatch, modeBatch.data(),                            // output gradient_batch
-        CUTENSOR_OP_ADD, descCompute));                                 // Will use gamma=-1.0 for subtraction
-    
-    // Create plan for gradient computation
-    cutensorPlanPreference_t planPrefGrad;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlanPreference(cutensor_handle_, &planPrefGrad, CUTENSOR_ALGO_DEFAULT, CUTENSOR_JIT_MODE_NONE));
-    
-    uint64_t workspaceSizeGrad = 0;
-    HANDLE_CUTENSOR_ERROR(cutensorEstimateWorkspaceSize(cutensor_handle_, descSubtractGrad, planPrefGrad, CUTENSOR_WORKSPACE_DEFAULT, &workspaceSizeGrad));
-    
-    cutensorPlan_t planGrad;
-    HANDLE_CUTENSOR_ERROR(cutensorCreatePlan(cutensor_handle_, &planGrad, descSubtractGrad, planPrefGrad, workspaceSizeGrad));
-    
-    void* workspaceGrad = nullptr;
-    if (workspaceSizeGrad > 0) {
-        HANDLE_CUDA_ERROR(cudaMalloc(&workspaceGrad, workspaceSizeGrad));
+// Backward pass with gradient clipping and stability checks
+void NeuralNetwork::backward_batch(const float* input_batch, const float* target_batch, 
+                                       float learning_rate, int batch_size,
+                                       float max_gradient_norm, float weight_decay) {
+    // Calculate layer sizes
+    std::vector<int> layer_sizes;
+    layer_sizes.push_back(layers_[0]->get_input_elements());
+    for (auto layer : layers_) {
+        layer_sizes.push_back(layer->get_output_elements());
     }
     
-    // Execute subtraction: gradient_batch = 1.0 * softmax_output_batch + (-1.0) * target_batch
-    float alpha_grad = 1.0f, gamma_grad = -1.0f;
-    HANDLE_CUTENSOR_ERROR(cutensorElementwiseBinaryExecute(cutensor_handle_, planGrad,
-        &alpha_grad, softmax_output_batch,   // softmax_output_batch
-        &gamma_grad, target_batch,           // -1.0 * target_batch
-        gradient_batch,                      // output gradient_batch
-        stream_));
+    // Allocate gradient buffers if needed
+    for (size_t i = 0; i < layer_gradients_.size(); i++) {
+        size_t size = batch_size * layer_sizes[i + 1] * sizeof(float);
+        if (!layer_gradients_[i]) {
+            HANDLE_CUDA_ERROR(cudaMalloc(&layer_gradients_[i], size));
+        }
+    }
+    
+    // Compute gradient for last layer (softmax + cross-entropy)
+    int num_classes = layer_sizes.back();
+    float* final_output = layer_outputs_.back();
+    float* final_gradient = layer_gradients_.back();
+    
+    // First, apply softmax to get predictions
+    size_t output_size = batch_size * num_classes * sizeof(float);
+    HANDLE_CUDA_ERROR(cudaMemcpy(final_gradient, final_output, output_size, cudaMemcpyDeviceToDevice));
+    
+    int block_size = 256;
+    int grid_size = (batch_size + block_size - 1) / block_size;
+    softmax_kernel<<<grid_size, block_size>>>(final_gradient, batch_size, num_classes);
+    HANDLE_CUDA_ERROR(cudaGetLastError());
+    
+    // Compute gradient: predictions - targets
+    int total_elements = batch_size * num_classes;
+    grid_size = (total_elements + block_size - 1) / block_size;
+    softmax_cross_entropy_gradient_kernel<<<grid_size, block_size>>>(final_gradient, target_batch, 
+                                                                     final_gradient, batch_size, num_classes);
+    HANDLE_CUDA_ERROR(cudaGetLastError());
     
     // Scale gradient by 1/batch_size for average loss
-    float scale = 1.0f / static_cast<float>(batch_size);
-    dim3 blockSize(256);
-    dim3 gridSize((batch_size * size + blockSize.x - 1) / blockSize.x);
-    scale_batch_kernel<<<gridSize, blockSize, 0, stream_>>>(
-        gradient_batch, scale, batch_size * size);
+    cutensorHandle_t handle;
+    HANDLE_CUTENSOR_ERROR(cutensorCreate(&handle));
+    
+    float scale = 1.0f / batch_size;
+    float* d_zero;
+    HANDLE_CUDA_ERROR(cudaMalloc(&d_zero, sizeof(float)));
+    HANDLE_CUDA_ERROR(cudaMemset(d_zero, 0, sizeof(float)));
+    
+    std::vector<int64_t> extent{batch_size, num_classes};
+    std::vector<int32_t> mode{'i', 'j'};
+    std::vector<int64_t> extentScalar{};
+    std::vector<int32_t> modeScalar{};
+    
+    cutensor_elementwise_trinary_wrapper(handle,
+                                        final_gradient, d_zero, d_zero, final_gradient,
+                                        extent, extentScalar, extentScalar, extent,
+                                        mode, modeScalar, modeScalar, mode,
+                                        CUTENSOR_OP_IDENTITY, CUTENSOR_OP_IDENTITY, CUTENSOR_OP_IDENTITY,
+                                        CUTENSOR_OP_ADD, CUTENSOR_OP_ADD,
+                                        scale, 0.0f, 0.0f, 0);
+    
+    // Backward pass through layers with safe updates
+    for (int i = layers_.size() - 1; i >= 0; i--) {
+        float* input_to_layer = layer_outputs_[i];
+        float* grad_output = layer_gradients_[i];
+        float* grad_input = (i > 0) ? layer_gradients_[i - 1] : nullptr;
+        
+        // Allocate temporary buffers for weight and bias gradients
+        int input_size = layers_[i]->get_input_elements();
+        int output_size = layers_[i]->get_output_elements();
+        
+        float* dW;
+        float* db;
+        HANDLE_CUDA_ERROR(cudaMalloc(&dW, input_size * output_size * sizeof(float)));
+        HANDLE_CUDA_ERROR(cudaMalloc(&db, output_size * sizeof(float)));
+        
+        // Backward pass to compute gradients
+        layers_[i]->backward_batch(input_to_layer, grad_output, dW, db, grad_input, batch_size);
+        
+        // Update parameters with gradient clipping
+        layers_[i]->update_parameters(dW, db, learning_rate, max_gradient_norm, weight_decay);
+        
+        // Free temporary buffers
+        HANDLE_CUDA_ERROR(cudaFree(dW));
+        HANDLE_CUDA_ERROR(cudaFree(db));
+    }
     
     // Cleanup
-    if (workspaceGrad) HANDLE_CUDA_ERROR(cudaFree(workspaceGrad));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlan(planGrad));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyOperationDescriptor(descSubtractGrad));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descSoftmaxBatch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descTargetBatch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyTensorDescriptor(descGradientBatch));
-    HANDLE_CUTENSOR_ERROR(cutensorDestroyPlanPreference(planPrefGrad));
-    
-    HANDLE_CUDA_ERROR(cudaStreamSynchronize(stream_));
+    HANDLE_CUDA_ERROR(cudaFree(d_zero));
+    HANDLE_CUTENSOR_ERROR(cutensorDestroy(handle));
 }
 
-// Old softmax implementation removed - now using cuTensor-enhanced version
-
-float NeuralNetwork::forward(const float* input, const float* target) {
-    const float* current_input = input;
+// Predict batch - get class predictions
+void NeuralNetwork::predict_batch(const float* input_batch, int* predictions, int batch_size) {
+    // Calculate sizes
+    std::vector<int> layer_sizes;
+    layer_sizes.push_back(layers_[0]->get_input_elements());
+    for (auto layer : layers_) {
+        layer_sizes.push_back(layer->get_output_elements());
+    }
+    
+    // Ensure output buffers are allocated
+    for (size_t i = 0; i < layer_outputs_.size(); i++) {
+        size_t size = batch_size * layer_sizes[i] * sizeof(float);
+        if (!layer_outputs_[i]) {
+            HANDLE_CUDA_ERROR(cudaMalloc(&layer_outputs_[i], size));
+        }
+    }
+    
+    // Copy input to first output buffer
+    size_t input_size = batch_size * layer_sizes[0] * sizeof(float);
+    HANDLE_CUDA_ERROR(cudaMemcpy(layer_outputs_[0], input_batch, input_size, cudaMemcpyDeviceToDevice));
     
     // Forward pass through all layers
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        layers_[i]->forward(current_input, layer_outputs_[i]);
-        current_input = layer_outputs_[i];
+    for (size_t i = 0; i < layers_.size(); i++) {
+        layers_[i]->forward_batch(layer_outputs_[i], layer_outputs_[i + 1], batch_size);
     }
     
-    // Apply softmax to final layer output using cuTensor-enhanced implementation
-    int final_size = layers_.back()->get_output_elements();
-    apply_softmax_cutensor(layer_outputs_.back(), softmax_output_d_, final_size);
+    // Get argmax of final layer output (logits)
+    int num_classes = layer_sizes.back();
+    float* final_output = layer_outputs_.back();
     
-    // Compute cross-entropy loss using cuTensor-enhanced implementation
-    float loss = compute_cross_entropy_loss_cutensor(softmax_output_d_, target, final_size);
-    
-    return loss;
-}
-
-void NeuralNetwork::backward(const float* input, const float* target, float learning_rate) {
-    int final_size = layers_.back()->get_output_elements();
-    
-    // Compute gradient of cross-entropy loss w.r.t. final layer output using cuTensor
-    compute_cross_entropy_gradient_cutensor(softmax_output_d_, target, loss_gradient_d_, final_size);
-    
-    // Allocate device memory for weight and bias gradients
-    std::vector<float*> dW_list, db_list;
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        int input_size = layers_[i]->get_input_elements();
-        int output_size = layers_[i]->get_output_elements();
-        
-        float* dW;
-        float* db;
-        HANDLE_CUDA_ERROR(cudaMalloc(&dW, input_size * output_size * sizeof(float)));
-        HANDLE_CUDA_ERROR(cudaMalloc(&db, output_size * sizeof(float)));
-        
-        dW_list.push_back(dW);
-        db_list.push_back(db);
-    }
-    
-    // Backward pass through layers (from last to first)
-    const float* current_gradient = loss_gradient_d_;
-    
-    for (int i = layers_.size() - 1; i >= 0; --i) {
-        // Determine input for this layer
-        const float* layer_input;
-        if (i == 0) {
-            layer_input = input; // First layer gets original input
-        } else {
-            layer_input = layer_outputs_[i - 1]; // Other layers get previous layer output
-        }
-        
-        // Compute gradients for this layer
-        float* dx = (i > 0) ? layer_gradients_[i - 1] : nullptr; // No need for dx for first layer
-        
-        layers_[i]->backward(layer_input, current_gradient, dW_list[i], db_list[i], dx);
-        
-        // Update parameters immediately
-        layers_[i]->update_parameters(dW_list[i], db_list[i], learning_rate);
-        
-        // Set gradient for next iteration (previous layer)
-        if (i > 0) {
-            current_gradient = layer_gradients_[i - 1];
-        }
-    }
-    
-    // Cleanup gradient memory
-    for (float* ptr : dW_list) {
-        cudaFree(ptr);
-    }
-    for (float* ptr : db_list) {
-        cudaFree(ptr);
-    }
-}
-
-int NeuralNetwork::predict(const float* input) {
-    // Forward pass without target (for prediction only)
-    const float* current_input = input;
-    
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        layers_[i]->forward(current_input, layer_outputs_[i]);
-        current_input = layer_outputs_[i];
-    }
-    
-    // Apply softmax to final layer using cuTensor-enhanced implementation
-    int final_size = layers_.back()->get_output_elements();
-    apply_softmax_cutensor(layer_outputs_.back(), softmax_output_d_, final_size);
-    
-    // Find index of maximum value
-    float* softmax_output_h = new float[final_size];
-    HANDLE_CUDA_ERROR(cudaMemcpy(softmax_output_h, softmax_output_d_, final_size * sizeof(float), cudaMemcpyDeviceToHost));
-    
-    int max_index = 0;
-    float max_value = softmax_output_h[0];
-    for (int i = 1; i < final_size; ++i) {
-        if (softmax_output_h[i] > max_value) {
-            max_value = softmax_output_h[i];
-            max_index = i;
-        }
-    }
-    
-    delete[] softmax_output_h;
-    return max_index;
-}
-
-float NeuralNetwork::forward_batch(const float* input_batch, const float* target_batch, int batch_size) {
-    // Allocate device memory for batch layer outputs
-    std::vector<float*> batch_layer_outputs;
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        int output_size = layers_[i]->get_output_elements();
-        
-        float* batch_output_d;
-        HANDLE_CUDA_ERROR(cudaMalloc(&batch_output_d, batch_size * output_size * sizeof(float)));
-        batch_layer_outputs.push_back(batch_output_d);
-    }
-    
-    // Allocate device memory for batch softmax output
-    int final_size = layers_.back()->get_output_elements();
-    float* batch_softmax_output_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&batch_softmax_output_d, batch_size * final_size * sizeof(float)));
-    
-    // Forward pass through all layers using batch processing
-    const float* current_input_batch = input_batch;
-    
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        layers_[i]->forward_batch(current_input_batch, batch_layer_outputs[i], batch_size);
-        current_input_batch = batch_layer_outputs[i];
-    }
-    
-    // Apply batch softmax to final layer output using cuTensor-enhanced implementation
-    apply_softmax_batch_cutensor(batch_layer_outputs.back(), batch_softmax_output_d, batch_size, final_size);
-    
-    // Compute cross-entropy loss using cuTensor-enhanced batch implementation
-    float loss = compute_cross_entropy_loss_batch_cutensor(batch_softmax_output_d, target_batch, batch_size, final_size);
-    
-    // Cleanup batch memory
-    for (float* ptr : batch_layer_outputs) {
-        cudaFree(ptr);
-    }
-    cudaFree(batch_softmax_output_d);
-    
-    return loss;
-}
-
-void NeuralNetwork::backward_batch(const float* input_batch, const float* target_batch, float learning_rate, int batch_size) {
-    // Allocate device memory for batch layer outputs and gradients
-    std::vector<float*> batch_layer_outputs, batch_layer_gradients;
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        int output_size = layers_[i]->get_output_elements();
-        
-        float* batch_output_d;
-        HANDLE_CUDA_ERROR(cudaMalloc(&batch_output_d, batch_size * output_size * sizeof(float)));
-        batch_layer_outputs.push_back(batch_output_d);
-        
-        float* batch_gradient_d;
-        HANDLE_CUDA_ERROR(cudaMalloc(&batch_gradient_d, batch_size * output_size * sizeof(float)));
-        batch_layer_gradients.push_back(batch_gradient_d);
-    }
-    
-    // Forward pass to compute layer outputs
-    const float* current_input_batch = input_batch;
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        layers_[i]->forward_batch(current_input_batch, batch_layer_outputs[i], batch_size);
-        current_input_batch = batch_layer_outputs[i];
-    }
-    
-    // Apply batch softmax and compute loss gradient
-    int final_size = layers_.back()->get_output_elements();
-    float* batch_softmax_output_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&batch_softmax_output_d, batch_size * final_size * sizeof(float)));
-    
-    apply_softmax_batch_cutensor(batch_layer_outputs.back(), batch_softmax_output_d, batch_size, final_size);
-    
-    // Compute gradient of cross-entropy loss w.r.t. final layer output using cuTensor
-    compute_cross_entropy_gradient_batch_cutensor(batch_softmax_output_d, target_batch, batch_layer_gradients.back(), batch_size, final_size);
-    
-    // Allocate device memory for weight and bias gradients
-    std::vector<float*> dW_list, db_list;
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        int input_size = layers_[i]->get_input_elements();
-        int output_size = layers_[i]->get_output_elements();
-        
-        float* dW;
-        float* db;
-        HANDLE_CUDA_ERROR(cudaMalloc(&dW, input_size * output_size * sizeof(float)));
-        HANDLE_CUDA_ERROR(cudaMalloc(&db, output_size * sizeof(float)));
-        
-        dW_list.push_back(dW);
-        db_list.push_back(db);
-    }
-    
-    // Backward pass through layers (from last to first)
-    const float* current_gradient_batch = batch_layer_gradients.back();
-    
-    for (int i = layers_.size() - 1; i >= 0; --i) {
-        // Determine input batch for this layer
-        const float* layer_input_batch;
-        if (i == 0) {
-            layer_input_batch = input_batch; // First layer gets original input batch
-        } else {
-            layer_input_batch = batch_layer_outputs[i - 1]; // Other layers get previous layer output batch
-        }
-        
-        // Compute gradients for this layer
-        float* dx_batch = (i > 0) ? batch_layer_gradients[i - 1] : nullptr; // No need for dx for first layer
-        
-        layers_[i]->backward_batch(layer_input_batch, current_gradient_batch, dW_list[i], db_list[i], dx_batch, batch_size);
-        
-        // Update parameters immediately
-        layers_[i]->update_parameters(dW_list[i], db_list[i], learning_rate);
-        
-        // Set gradient for next iteration (previous layer)
-        if (i > 0) {
-            current_gradient_batch = batch_layer_gradients[i - 1];
-        }
-    }
-    
-    // Cleanup memory
-    for (float* ptr : batch_layer_outputs) {
-        cudaFree(ptr);
-    }
-    for (float* ptr : batch_layer_gradients) {
-        cudaFree(ptr);
-    }
-    for (float* ptr : dW_list) {
-        cudaFree(ptr);
-    }
-    for (float* ptr : db_list) {
-        cudaFree(ptr);
-    }
-    cudaFree(batch_softmax_output_d);
-}
-
-void NeuralNetwork::predict_batch(const float* input_batch, int* predictions, int batch_size) {
-    // Allocate device memory for batch layer outputs
-    std::vector<float*> batch_layer_outputs;
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        int output_size = layers_[i]->get_output_elements();
-        
-        float* batch_output_d;
-        HANDLE_CUDA_ERROR(cudaMalloc(&batch_output_d, batch_size * output_size * sizeof(float)));
-        batch_layer_outputs.push_back(batch_output_d);
-    }
-    
-    // Forward pass without target (for prediction only)
-    const float* current_input_batch = input_batch;
-    
-    for (size_t i = 0; i < layers_.size(); ++i) {
-        layers_[i]->forward_batch(current_input_batch, batch_layer_outputs[i], batch_size);
-        current_input_batch = batch_layer_outputs[i];
-    }
-    
-    // Apply batch softmax to final layer using cuTensor-enhanced implementation
-    int final_size = layers_.back()->get_output_elements();
-    float* batch_softmax_output_d;
-    HANDLE_CUDA_ERROR(cudaMalloc(&batch_softmax_output_d, batch_size * final_size * sizeof(float)));
-    
-    apply_softmax_batch_cutensor(batch_layer_outputs.back(), batch_softmax_output_d, batch_size, final_size);
-    
-    // Copy softmax output to host
-    float* batch_softmax_output_h = new float[batch_size * final_size];
-    HANDLE_CUDA_ERROR(cudaMemcpy(batch_softmax_output_h, batch_softmax_output_d, batch_size * final_size * sizeof(float), cudaMemcpyDeviceToHost));
-    
-    // Find index of maximum value for each batch item
-    for (int b = 0; b < batch_size; ++b) {
-        int max_index = 0;
-        float max_value = batch_softmax_output_h[b * final_size + 0];
-        
-        for (int i = 1; i < final_size; ++i) {
-            if (batch_softmax_output_h[b * final_size + i] > max_value) {
-                max_value = batch_softmax_output_h[b * final_size + i];
-                max_index = i;
-            }
-        }
-        
-        predictions[b] = max_index;
-    }
-    
-    // Cleanup memory
-    for (float* ptr : batch_layer_outputs) {
-        cudaFree(ptr);
-    }
-    cudaFree(batch_softmax_output_d);
-    delete[] batch_softmax_output_h;
+    int block_size = 256;
+    int grid_size = (batch_size + block_size - 1) / block_size;
+    argmax_kernel<<<grid_size, block_size>>>(final_output, predictions, batch_size, num_classes);
+    HANDLE_CUDA_ERROR(cudaGetLastError());
 }

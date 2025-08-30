@@ -76,6 +76,29 @@ You could install it on Ubuntu by:
 sudo apt install libfreeimage-dev
 ```
 
+### Google Test (for unit testing)
+Google Test is now automatically managed by the Makefile. You don't need to install it manually.
+
+To install Google Test locally within the project:
+```
+make install-gtest
+```
+
+This will:
+- Download Google Test v1.14.0 source code
+- Build it with CMake
+- Install it to `third_party/googletest/install/`
+
+To check if Google Test is installed:
+```
+make check-gtest
+```
+
+To clean the Google Test installation:
+```
+make clean-gtest
+```
+
 ## Prerequisites
 
 Download and install the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) for your corresponding platform.
@@ -84,12 +107,23 @@ Make sure the dependencies mentioned in [Dependencies]() section above are insta
 ## Build and Run
 Now the `make build` will detect GPU model automatically and set the corresponding arch tag for nvcc compiling.
 
+### Basic Commands
 * `make build`:  build the binary
 * `make run`: run the binary with example data
 * `make clean`: delete the binary
 * `make gpu-info`: show the GPU information.
 * `make test-cuda`: show cuda version and nvcc path.
 * `make compile-commands`: generate the `compile_commands.json`
+
+### Unit Testing
+* `make install-gtest`: Install Google Test dependency (required for unit tests)
+* `make build-nn-utils-test`: Build the neural network unit tests
+* `make run-nn-utils-test`: Run the neural network unit tests
+
+### Google Test Management
+* `make check-gtest`: Check if Google Test is installed
+* `make clean-gtest`: Remove Google Test installation
+* `make clean-all`: Clean everything including dependencies
 
 ## Demo output
 TODO
