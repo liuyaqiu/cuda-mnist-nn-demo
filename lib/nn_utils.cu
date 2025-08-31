@@ -562,125 +562,54 @@ void cutensor_elementwise_trinary_wrapper(cutensorHandle_t &cutensor_handle,
     float* B_broadcast = nullptr;
     float* C_broadcast = nullptr;
     
-    // Check and handle broadcasting for A
-    if (validateAndCheckBroadcasting(modeA, extentA, "A")) {
-        auto broadcastInfo = createBroadcastInfo(modeA, extentA);
-        std::vector<int64_t> onesExtent = broadcastInfo.first;
-        std::vector<int32_t> onesModes = broadcastInfo.second;
-        
-        if (!onesExtent.empty()) {
-            // Create ones tensor for broadcasting
-            size_t onesSize = 1;
-            for (auto e : onesExtent) onesSize *= e;
+    // Helper lambda to handle broadcasting for a single tensor
+    auto handleTensorBroadcasting = [&](const float* tensor, const float*& tensor_use, float*& tensor_broadcast,
+                                        const std::vector<int32_t>& mode, const std::vector<int64_t>& extent,
+                                        const char* tensorName) {
+        if (validateAndCheckBroadcasting(mode, extent, tensorName)) {
+            auto broadcastInfo = createBroadcastInfo(mode, extent);
+            std::vector<int64_t> onesExtent = broadcastInfo.first;
+            std::vector<int32_t> onesModes = broadcastInfo.second;
             
-            float* d_ones;
-            HANDLE_CUDA_ERROR(cudaMalloc(&d_ones, onesSize * sizeof(float)));
-            std::vector<float> h_ones(onesSize, 1.0f);
-            HANDLE_CUDA_ERROR(cudaMemcpy(d_ones, h_ones.data(), onesSize * sizeof(float), cudaMemcpyHostToDevice));
-            
-            // Allocate broadcasted tensor
-            size_t broadcastSize = 1;
-            for (auto e : extentD) broadcastSize *= e;
-            HANDLE_CUDA_ERROR(cudaMalloc(&A_broadcast, broadcastSize * sizeof(float)));
-            
-            // Special case: if A is a scalar (empty modes), we need to fill the output with the scalar value
-            if (modeA.empty() && extentA.empty()) {
-                // A is a scalar - we need to fill the entire output tensor with this value
-                float h_scalar;
-                HANDLE_CUDA_ERROR(cudaMemcpy(&h_scalar, A, sizeof(float), cudaMemcpyDeviceToHost));
-                std::vector<float> h_broadcast(broadcastSize, h_scalar);
-                HANDLE_CUDA_ERROR(cudaMemcpy(A_broadcast, h_broadcast.data(), broadcastSize * sizeof(float), cudaMemcpyHostToDevice));
-            } else {
-                // Perform broadcasting via contraction
-                cutensor_contraction_wrapper(cutensor_handle, d_ones, A, A_broadcast,
-                                            onesExtent, extentA, extentD,
-                                            onesModes, modeA, modeD, stream);
+            if (!onesExtent.empty()) {
+                // Create ones tensor for broadcasting
+                size_t onesSize = 1;
+                for (auto e : onesExtent) onesSize *= e;
+                
+                float* d_ones;
+                HANDLE_CUDA_ERROR(cudaMalloc(&d_ones, onesSize * sizeof(float)));
+                std::vector<float> h_ones(onesSize, 1.0f);
+                HANDLE_CUDA_ERROR(cudaMemcpy(d_ones, h_ones.data(), onesSize * sizeof(float), cudaMemcpyHostToDevice));
+                
+                // Allocate broadcasted tensor
+                size_t broadcastSize = 1;
+                for (auto e : extentD) broadcastSize *= e;
+                HANDLE_CUDA_ERROR(cudaMalloc(&tensor_broadcast, broadcastSize * sizeof(float)));
+                
+                // Special case: if tensor is a scalar (empty modes), we need to fill the output with the scalar value
+                if (mode.empty() && extent.empty()) {
+                    // Tensor is a scalar - we need to fill the entire output tensor with this value
+                    float h_scalar;
+                    HANDLE_CUDA_ERROR(cudaMemcpy(&h_scalar, tensor, sizeof(float), cudaMemcpyDeviceToHost));
+                    std::vector<float> h_broadcast(broadcastSize, h_scalar);
+                    HANDLE_CUDA_ERROR(cudaMemcpy(tensor_broadcast, h_broadcast.data(), broadcastSize * sizeof(float), cudaMemcpyHostToDevice));
+                } else {
+                    // Perform broadcasting via contraction
+                    cutensor_contraction_wrapper(cutensor_handle, d_ones, tensor, tensor_broadcast,
+                                                onesExtent, extent, extentD,
+                                                onesModes, mode, modeD, stream);
+                }
+                
+                tensor_use = tensor_broadcast;
+                HANDLE_CUDA_ERROR(cudaFree(d_ones));
             }
-            
-            A_use = A_broadcast;
-            HANDLE_CUDA_ERROR(cudaFree(d_ones));
         }
-    }
+    };
     
-    // Check and handle broadcasting for B
-    if (validateAndCheckBroadcasting(modeB, extentB, "B")) {
-        auto broadcastInfo = createBroadcastInfo(modeB, extentB);
-        std::vector<int64_t> onesExtent = broadcastInfo.first;
-        std::vector<int32_t> onesModes = broadcastInfo.second;
-        
-        if (!onesExtent.empty()) {
-            // Create ones tensor for broadcasting
-            size_t onesSize = 1;
-            for (auto e : onesExtent) onesSize *= e;
-            
-            float* d_ones;
-            HANDLE_CUDA_ERROR(cudaMalloc(&d_ones, onesSize * sizeof(float)));
-            std::vector<float> h_ones(onesSize, 1.0f);
-            HANDLE_CUDA_ERROR(cudaMemcpy(d_ones, h_ones.data(), onesSize * sizeof(float), cudaMemcpyHostToDevice));
-            
-            // Allocate broadcasted tensor
-            size_t broadcastSize = 1;
-            for (auto e : extentD) broadcastSize *= e;
-            HANDLE_CUDA_ERROR(cudaMalloc(&B_broadcast, broadcastSize * sizeof(float)));
-            
-            // Special case: if B is a scalar (empty modes), we need to fill the output with the scalar value
-            if (modeB.empty() && extentB.empty()) {
-                // B is a scalar - we need to fill the entire output tensor with this value
-                float h_scalar;
-                HANDLE_CUDA_ERROR(cudaMemcpy(&h_scalar, B, sizeof(float), cudaMemcpyDeviceToHost));
-                std::vector<float> h_broadcast(broadcastSize, h_scalar);
-                HANDLE_CUDA_ERROR(cudaMemcpy(B_broadcast, h_broadcast.data(), broadcastSize * sizeof(float), cudaMemcpyHostToDevice));
-            } else {
-                // Perform broadcasting via contraction
-                cutensor_contraction_wrapper(cutensor_handle, d_ones, B, B_broadcast,
-                                            onesExtent, extentB, extentD,
-                                            onesModes, modeB, modeD, stream);
-            }
-            
-            B_use = B_broadcast;
-            HANDLE_CUDA_ERROR(cudaFree(d_ones));
-        }
-    }
-    
-    // Check and handle broadcasting for C
-    if (validateAndCheckBroadcasting(modeC, extentC, "C")) {
-        auto broadcastInfo = createBroadcastInfo(modeC, extentC);
-        std::vector<int64_t> onesExtent = broadcastInfo.first;
-        std::vector<int32_t> onesModes = broadcastInfo.second;
-        
-        if (!onesExtent.empty()) {
-            // Create ones tensor for broadcasting
-            size_t onesSize = 1;
-            for (auto e : onesExtent) onesSize *= e;
-            
-            float* d_ones;
-            HANDLE_CUDA_ERROR(cudaMalloc(&d_ones, onesSize * sizeof(float)));
-            std::vector<float> h_ones(onesSize, 1.0f);
-            HANDLE_CUDA_ERROR(cudaMemcpy(d_ones, h_ones.data(), onesSize * sizeof(float), cudaMemcpyHostToDevice));
-            
-            // Allocate broadcasted tensor
-            size_t broadcastSize = 1;
-            for (auto e : extentD) broadcastSize *= e;
-            HANDLE_CUDA_ERROR(cudaMalloc(&C_broadcast, broadcastSize * sizeof(float)));
-            
-            // Special case: if C is a scalar (empty modes), we need to fill the output with the scalar value
-            if (modeC.empty() && extentC.empty()) {
-                // C is a scalar - we need to fill the entire output tensor with this value
-                float h_scalar;
-                HANDLE_CUDA_ERROR(cudaMemcpy(&h_scalar, C, sizeof(float), cudaMemcpyDeviceToHost));
-                std::vector<float> h_broadcast(broadcastSize, h_scalar);
-                HANDLE_CUDA_ERROR(cudaMemcpy(C_broadcast, h_broadcast.data(), broadcastSize * sizeof(float), cudaMemcpyHostToDevice));
-            } else {
-                // Perform broadcasting via contraction
-                cutensor_contraction_wrapper(cutensor_handle, d_ones, C, C_broadcast,
-                                            onesExtent, extentC, extentD,
-                                            onesModes, modeC, modeD, stream);
-            }
-            
-            C_use = C_broadcast;
-            HANDLE_CUDA_ERROR(cudaFree(d_ones));
-        }
-    }
+    // Handle broadcasting for all three tensors
+    handleTensorBroadcasting(A, A_use, A_broadcast, modeA, extentA, "A");
+    handleTensorBroadcasting(B, B_use, B_broadcast, modeB, extentB, "B");
+    handleTensorBroadcasting(C, C_use, C_broadcast, modeC, extentC, "C");
     
     // Now perform the trinary operation with all tensors having the same shape
     // Compute strides for row-major layout

@@ -31,6 +31,9 @@
 #
 ################################################################################
 
+# Default target
+default: build-model-demo
+
 # Define the compiler and flags
 NVCC = /usr/local/cuda/bin/nvcc
 CXX = g++
@@ -98,34 +101,36 @@ MNIST_TEST_LABELS_CHECKSUM = md5::bb300cfdad3c16e7a12a480ee83cd310
 DOWNLOAD_SCRIPT = scripts/download_artifacts.sh
 
 # Define source files and target executables
-SRC_CUTENSOR = $(SRC_DIR)/cutensor_example.cu
-SRC_DEMO = $(SRC_DIR)/demo_example.cu
+SRC_MODEL_DEMO = $(SRC_DIR)/model_demo.cu
 SRC_NN_UTILS = $(LIB_DIR)/nn_utils.cu
 SRC_DATA_LOADER = $(LIB_DIR)/data_loader.cu
+SRC_MODEL = $(LIB_DIR)/model.cu
 SRC_NN_UTILS_TEST = $(TESTS_DIR)/nn_utils_test.cu
 SRC_DATA_LOADER_TEST = $(TESTS_DIR)/data_loader_test.cu
+SRC_MODEL_TEST = $(TESTS_DIR)/model_test.cu
 
-TARGET_CUTENSOR = $(BIN_DIR)/cutensor_example
-TARGET_DEMO = $(BIN_DIR)/demo_example
+TARGET_MODEL_DEMO = $(BIN_DIR)/model_demo
 TARGET_NN_UTILS_TEST = $(BIN_DIR)/nn_utils_test
 TARGET_DATA_LOADER_TEST = $(BIN_DIR)/data_loader_test
+TARGET_MODEL_TEST = $(BIN_DIR)/model_test
 
-OBJ_CUTENSOR = $(OBJ_DIR)/cutensor_example.o
-OBJ_DEMO = $(OBJ_DIR)/demo_example.o
+OBJ_MODEL_DEMO = $(OBJ_DIR)/model_demo.o
 OBJ_NN_UTILS = $(OBJ_DIR)/nn_utils.o
 OBJ_DATA_LOADER = $(OBJ_DIR)/data_loader.o
-OBJ_TEST_DATA_LOADER = $(OBJ_DIR)/test_data_loader.o
+OBJ_MODEL = $(OBJ_DIR)/model.o
 OBJ_NN_UTILS_TEST = $(OBJ_DIR)/nn_utils_test.o
 OBJ_DATA_LOADER_TEST = $(OBJ_DIR)/data_loader_test.o
+OBJ_MODEL_TEST = $(OBJ_DIR)/model_test.o
 
 # Build targets
-build-cutensor-example: $(TARGET_CUTENSOR)
-build-demo-example: $(TARGET_DEMO)
+build-model-demo: $(TARGET_MODEL_DEMO)
 build-nn-utils: $(OBJ_NN_UTILS)
 build-data-loader: $(OBJ_DATA_LOADER)
+build-model: $(OBJ_MODEL)
 build-nn-utils-test: $(TARGET_NN_UTILS_TEST)
 build-data-loader-test: $(TARGET_DATA_LOADER_TEST)
-build-all: $(TARGET_CUTENSOR) $(TARGET_DEMO) $(OBJ_DATA_LOADER) $(TARGET_NN_UTILS_TEST) $(TARGET_DATA_LOADER_TEST)
+build-model-test: $(TARGET_MODEL_TEST)
+build-all: $(TARGET_MODEL_DEMO) $(OBJ_DATA_LOADER) $(TARGET_NN_UTILS_TEST) $(TARGET_DATA_LOADER_TEST) $(TARGET_MODEL_TEST)
 
 # Create necessary directories
 $(OBJ_DIR):
@@ -189,13 +194,9 @@ clean-gtest:
 	@echo "Google Test cleaned."
 
 # Rules for compiling CUDA source to object files
-$(OBJ_CUTENSOR): $(SRC_CUTENSOR) | $(OBJ_DIR)
-	@echo "Compiling cuTENSOR example with detected GPU architecture: sm_$(GPU_ARCH)"
-	$(NVCC) $(NVCCFLAGS) $(SRC_CUTENSOR) -o $(OBJ_CUTENSOR)
-
-$(OBJ_DEMO): $(SRC_DEMO) | $(OBJ_DIR)
-	@echo "Compiling demo example with detected GPU architecture: sm_$(GPU_ARCH)"
-	$(NVCC) $(NVCCFLAGS) $(SRC_DEMO) -o $(OBJ_DEMO)
+$(OBJ_MODEL_DEMO): $(SRC_MODEL_DEMO) | $(OBJ_DIR)
+	@echo "Compiling model demo with detected GPU architecture: sm_$(GPU_ARCH)"
+	$(NVCC) $(NVCCFLAGS) $(SRC_MODEL_DEMO) -o $(OBJ_MODEL_DEMO)
 
 $(OBJ_NN_UTILS): $(SRC_NN_UTILS) | $(OBJ_DIR)
 	@echo "Compiling neural network utils with detected GPU architecture: sm_$(GPU_ARCH)"
@@ -205,9 +206,9 @@ $(OBJ_DATA_LOADER): $(SRC_DATA_LOADER) | $(OBJ_DIR)
 	@echo "Compiling data loader with detected GPU architecture: sm_$(GPU_ARCH)"
 	$(NVCC) $(NVCCFLAGS) $(SRC_DATA_LOADER) -o $(OBJ_DATA_LOADER)
 
-$(OBJ_TEST_DATA_LOADER): $(SRC_TEST_DATA_LOADER) | $(OBJ_DIR)
-	@echo "Compiling data loader test with detected GPU architecture: sm_$(GPU_ARCH)"
-	$(NVCC) $(NVCCFLAGS) $(SRC_TEST_DATA_LOADER) -o $(OBJ_TEST_DATA_LOADER)
+$(OBJ_MODEL): $(SRC_MODEL) | $(OBJ_DIR)
+	@echo "Compiling model with detected GPU architecture: sm_$(GPU_ARCH)"
+	$(NVCC) $(NVCCFLAGS) $(SRC_MODEL) -o $(OBJ_MODEL)
 
 $(OBJ_NN_UTILS_TEST): $(SRC_NN_UTILS_TEST) $(GTEST_INSTALL_DIR)/lib/libgtest.a | $(OBJ_DIR)
 	@echo "Compiling neural network unit tests with detected GPU architecture: sm_$(GPU_ARCH)"
@@ -217,14 +218,14 @@ $(OBJ_DATA_LOADER_TEST): $(SRC_DATA_LOADER_TEST) $(GTEST_INSTALL_DIR)/lib/libgte
 	@echo "Compiling data loader unit tests with detected GPU architecture: sm_$(GPU_ARCH)"
 	$(NVCC) $(NVCCFLAGS) $(GTEST_FLAGS) $(SRC_DATA_LOADER_TEST) -o $(OBJ_DATA_LOADER_TEST)
 
-# Rules for linking to create final executables
-$(TARGET_CUTENSOR): $(OBJ_CUTENSOR) | $(BIN_DIR)
-	@echo "Linking cuTENSOR executable with CUDA device code"
-	$(NVCC) $(NVCC_LINK_FLAGS) $(OBJ_CUTENSOR) -o $(TARGET_CUTENSOR) $(LDFLAGS)
+$(OBJ_MODEL_TEST): $(SRC_MODEL_TEST) $(GTEST_INSTALL_DIR)/lib/libgtest.a | $(OBJ_DIR)
+	@echo "Compiling model unit tests with detected GPU architecture: sm_$(GPU_ARCH)"
+	$(NVCC) $(NVCCFLAGS) $(GTEST_FLAGS) $(SRC_MODEL_TEST) -o $(OBJ_MODEL_TEST)
 
-$(TARGET_DEMO): $(OBJ_DEMO) | $(BIN_DIR)
-	@echo "Linking demo executable with CUDA device code and image libraries"
-	$(NVCC) $(NVCC_LINK_FLAGS) $(OBJ_DEMO) -o $(TARGET_DEMO) $(LDFLAGS)
+# Rules for linking to create final executables
+$(TARGET_MODEL_DEMO): $(OBJ_MODEL_DEMO) $(OBJ_MODEL) $(OBJ_NN_UTILS) $(OBJ_DATA_LOADER) | $(BIN_DIR)
+	@echo "Linking model demo executable with CUDA device code"
+	$(NVCC) $(NVCC_LINK_FLAGS) $(OBJ_MODEL_DEMO) $(OBJ_MODEL) $(OBJ_NN_UTILS) $(OBJ_DATA_LOADER) -o $(TARGET_MODEL_DEMO) $(LDFLAGS)
 
 $(TARGET_NN_UTILS_TEST): $(OBJ_NN_UTILS_TEST) $(OBJ_NN_UTILS) | $(BIN_DIR)
 	@echo "Linking neural network unit tests with Google Test"
@@ -234,20 +235,14 @@ $(TARGET_DATA_LOADER_TEST): $(OBJ_DATA_LOADER_TEST) $(OBJ_DATA_LOADER) | $(BIN_D
 	@echo "Linking data loader unit tests with Google Test"
 	$(NVCC) $(NVCC_LINK_FLAGS) $(OBJ_DATA_LOADER_TEST) $(OBJ_DATA_LOADER) -o $(TARGET_DATA_LOADER_TEST) $(LDFLAGS) $(GTEST_LIBS)
 
+$(TARGET_MODEL_TEST): $(OBJ_MODEL_TEST) $(OBJ_MODEL) $(OBJ_NN_UTILS) $(OBJ_DATA_LOADER) | $(BIN_DIR)
+	@echo "Linking model unit tests with Google Test"
+	$(NVCC) $(NVCC_LINK_FLAGS) $(OBJ_MODEL_TEST) $(OBJ_MODEL) $(OBJ_NN_UTILS) $(OBJ_DATA_LOADER) -o $(TARGET_MODEL_TEST) $(LDFLAGS) $(GTEST_LIBS)
+
 # Rules for running the applications
-run-cutensor-example: $(TARGET_CUTENSOR)
-	@echo "Running cuTENSOR example"
-	./$(TARGET_CUTENSOR)
-
-run-demo: $(TARGET_DEMO)
-	@echo "Running image demo example"
-	@echo "Usage: ./$(TARGET_DEMO) <image_file> [width] [height]"
-	@echo "Example: ./$(TARGET_DEMO) Common/data/teapot512.pgm"
-	@echo "Example: ./$(TARGET_DEMO) Common/data/teapot_512x512_8u_Gray.raw 512 512"
-
-run-test-nn: $(TARGET_TEST_NN)
-	@echo "Running neural network test"
-	./$(TARGET_TEST_NN)
+run-model-demo: $(TARGET_MODEL_DEMO)
+	@echo "Running model training demo"
+	./$(TARGET_MODEL_DEMO) $(ARGS)
 
 run-nn-utils-test: $(TARGET_NN_UTILS_TEST)
 	@echo "Running neural network unit tests"
@@ -256,6 +251,16 @@ run-nn-utils-test: $(TARGET_NN_UTILS_TEST)
 run-data-loader-test: $(TARGET_DATA_LOADER_TEST)
 	@echo "Running data loader unit tests"
 	./$(TARGET_DATA_LOADER_TEST)
+
+run-model-test: $(TARGET_MODEL_TEST)
+	@echo "Running model unit tests"
+	./$(TARGET_MODEL_TEST)
+
+run-unit-tests: $(TARGET_NN_UTILS_TEST) $(TARGET_DATA_LOADER_TEST) $(TARGET_MODEL_TEST)
+	@echo "Running all unit tests"
+	./$(TARGET_NN_UTILS_TEST)
+	./$(TARGET_DATA_LOADER_TEST)
+	./$(TARGET_MODEL_TEST)
 
 # Download training data and show dataset info
 download-data: | $(INPUT_DIR)
@@ -355,26 +360,29 @@ test-cuda:
 compile-commands:
 	@echo "Generating compile_commands.json using bear..."
 	@rm -f compile_commands.json
-	bear --output compile_commands.json -- make clean build
+	bear --output compile_commands.json -- make clean build-all
 	@echo "compile_commands.json generated successfully!"
 
 # Help command
 help:
 	@echo "Available make commands:"
-	@echo "  make              - Build the cuTENSOR example (default)."
-	@echo "  make build        - Build the cuTENSOR example."
-	@echo "  make build-demo   - Build the image demo example."
+	@echo "  make              - Build the model demo (default)."
+
+	@echo "  make build-model-demo - Build the model training demo."
 	@echo "  make build-nn-utils     - Build the neural network utilities."
 	@echo "  make build-data-loader - Build the data loader utilities."
-	@echo "  make build-test-data-loader - Build the data loader test program."
+	@echo "  make build-model       - Build the model class."
 	@echo "  make build-nn-utils-test - Build the neural network unit test program."
 	@echo "  make build-data-loader-test - Build the data loader unit test program."
+	@echo "  make build-model-test - Build the model unit test program."
 	@echo "  make build-all    - Build all examples and utilities."
-	@echo "  make run-cutensor-example          - Run the cuTENSOR example."
-	@echo "  make run-demo-example     - Show usage for image demo example."
-	@echo "  make run-test-data-loader - Run the data loader test program."
+
+	@echo "  make run-model-demo       - Run model training demo. Use ARGS= to pass parameters."
+
 	@echo "  make run-nn-utils-test - Run the neural network unit tests."
 	@echo "  make run-data-loader-test - Run the data loader unit tests."
+	@echo "  make run-model-test - Run the model unit tests."
+	@echo "  make run-unit-tests - Run all unit tests."
 	@echo "  make download-data - Download MNIST training dataset (~47MB) and show info."
 	@echo "  make show-data    - Display MNIST dataset information."
 	@echo "  make visualize-data - Visualize sample MNIST images (requires matplotlib)."
@@ -391,6 +399,11 @@ help:
 	@echo "  make install-gtest - Download and build Google Test locally."
 	@echo "  make check-gtest  - Check if Google Test is installed."
 	@echo "  make clean-gtest  - Remove Google Test installation."
+	@echo ""
+	@echo "Model Demo Examples:"
+	@echo "  make run-model-demo                    # Run with default parameters"
+	@echo "  make run-model-demo ARGS=\"--epochs 10\" # Run with 10 epochs"
+	@echo "  make run-model-demo ARGS=\"--epochs 5 --batch_size 64 --learning_rate 0.01\""
 	@echo ""
 	@echo "Data Management:"
 	@echo "  make download-data - Downloads and extracts MNIST dataset to data/input/"
@@ -409,8 +422,5 @@ help:
 	@echo "  Extract images as PNG:"
 	@echo "    python scripts/extract_mnist_images.py data/input/train-images-idx3-ubyte data/input/train-labels-idx1-ubyte --extract --count 100"
 	@echo ""
-	@echo "Image Demo Examples:"
-	@echo "  ./bin/demo_example Common/data/teapot512.pgm"
-	@echo "  ./bin/demo_example Common/data/teapot_512x512_8u_Gray.raw 512 512"
-	@echo ""
+
 	@echo "Note: The project contains CUDA device code (__global__ kernels)."
