@@ -32,6 +32,9 @@ Internal libraries, some custom utils functions.
 ```src/```
 The source code should be placed here in a hierarchical fashion, as appropriate.
 
+```scripts/```
+Some helpful scripts to download data.
+
 ```README.md```
 This file should hold the description of the project so that anyone cloning or deciding if they want to clone this repository can understand its purpose to help with their decision.
 
@@ -65,6 +68,7 @@ Linux
 x86_64 
 
 ## CUDA APIs involved
+cuTENSOR
 
 ## Dependencies needed to build/run
 
@@ -74,6 +78,12 @@ Project: [FreeImage](https://github.com/danoli3/FreeImage)
 You could install it on Ubuntu by:
 ```
 sudo apt install libfreeimage-dev
+```
+
+### CMAKE
+You should install cmake to build the gtest library.
+```
+sudo apt install cmake
 ```
 
 ### Google Test (for unit testing)
@@ -99,10 +109,18 @@ To clean the Google Test installation:
 make clean-gtest
 ```
 
+### Python dependency
+python >= 3.10
+```
+pip3 install -r requirements.txt
+```
+
 ## Prerequisites
 
 Download and install the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) for your corresponding platform.
 Make sure the dependencies mentioned in [Dependencies]() section above are installed.
+
+Download and install the [cuTENSOR](https://developer.nvidia.com/cutensor-downloads) for your corresponding platform.
 
 ## Build and Run
 Now the `make build` will detect GPU model automatically and set the corresponding arch tag for nvcc compiling.
@@ -119,11 +137,34 @@ Now the `make build` will detect GPU model automatically and set the correspondi
 * `make install-gtest`: Install Google Test dependency (required for unit tests)
 * `make build-nn-utils-test`: Build the neural network unit tests
 * `make run-nn-utils-test`: Run the neural network unit tests
+* `make run-unit-tests`: Run all the unit tests.
 
 ### Google Test Management
 * `make check-gtest`: Check if Google Test is installed
 * `make clean-gtest`: Remove Google Test installation
 * `make clean-all`: Clean everything including dependencies
 
+### Download dataset
+The dataset is [fashion-mnist](https://github.com/zalandoresearch/fashion-mnist), an upgraded version for [mnist](https://huggingface.co/datasets/ylecun/mnist).
+
+* `make download-data`: Download the mnist dataset into `data/input`.
+* `make extract-data`: Extract images from zipped data files.
+
 ## Demo output
-TODO
+Run the entrypoint shell script will download dataset automatically, build and run the unit tests, and then run the demo
+Neural Network training and testing.
+
+```bash
+./run.sh
+```
+
+The input data path:
+* `data/input/train_data`: the extracted training data images and labels.
+* `data/input/test_data`: the extracted test data images and labels.
+
+Then the output logs are:
+* [unittesting.log](data/output/unittesting.log)
+* [model_training.log](data/output/model_training.log)
+
+You could take a look at the logs for the demo Neural Network details.
+

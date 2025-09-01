@@ -262,8 +262,9 @@ run-unit-tests: $(TARGET_NN_UTILS_TEST) $(TARGET_DATA_LOADER_TEST) $(TARGET_MODE
 	./$(TARGET_DATA_LOADER_TEST)
 	./$(TARGET_MODEL_TEST)
 
+INPUT_DATA_FILES = $(INPUT_DIR)/train-images-idx3-ubyte.gz $(INPUT_DIR)/train-labels-idx1-ubyte.gz $(INPUT_DIR)/t10k-images-idx3-ubyte.gz $(INPUT_DIR)/t10k-labels-idx1-ubyte.gz
 # Download training data and show dataset info
-download-data: | $(INPUT_DIR)
+$(INPUT_DATA_FILES): | $(INPUT_DIR)
 	@echo "Downloading MNIST training dataset..."
 	@echo "This will download ~47MB of training data from Yann LeCun's MNIST database"
 	@echo ""
@@ -287,6 +288,8 @@ download-data: | $(INPUT_DIR)
 	@echo ""
 	@echo "Ready for training!"
 
+download-data: $(INPUT_DATA_FILES)
+
 # Show dataset information
 show-data:
 	@echo "=== MNIST Dataset Information ==="
@@ -306,8 +309,9 @@ visualize-data:
 	@echo "Opening matplotlib window with sample images..."
 	@python3 scripts/extract_mnist_images.py $(INPUT_DIR)/train-images-idx3-ubyte $(INPUT_DIR)/train-labels-idx1-ubyte --visualize
 
-# Extract sample images as PNG files
-extract-samples:
+EXTRACTED_DATA = $(INPUT_DIR)/input/train_data $(INPUT_DIR)/input/test_data
+
+$(EXTRACTED_DATA): $(INPUT_DATA_FILES)
 	@echo "=== Extracting Sample MNIST Images ==="
 	@if [ ! -f "$(INPUT_DIR)/train-images-idx3-ubyte" ] || [ ! -f "$(INPUT_DIR)/train-labels-idx1-ubyte" ]; then \
 		echo "Error: MNIST dataset files not found. Run 'make download-data' first."; \
@@ -318,13 +322,8 @@ extract-samples:
 	@python3 scripts/extract_mnist_images.py $(INPUT_DIR)/t10k-images-idx3-ubyte $(INPUT_DIR)/t10k-labels-idx1-ubyte --extract --output $(INPUT_DIR)/test_data
 	@echo "Sample images extracted to $(INPUT_DIR)/test_data/"
 
-# Download single MNIST file (internal helper target)
-download-mnist-file:
-	@if [ -z "$(URL)" ] || [ -z "$(CHECKSUM)" ] || [ -z "$(OUTPUT)" ]; then \
-		echo "Error: Missing parameters. Use: make download-mnist-file URL=<url> CHECKSUM=<checksum> OUTPUT=<path>"; \
-		exit 1; \
-	fi
-	$(DOWNLOAD_SCRIPT) "$(URL)" "$(CHECKSUM)" "$(OUTPUT)"
+# Extract sample images as PNG files
+extract-data: $(EXTRACTED_DATA)
 
 # Clean up
 clean:

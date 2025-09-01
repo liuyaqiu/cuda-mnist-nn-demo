@@ -332,12 +332,6 @@ int main(int argc, char** argv) {
         // Print final GPU memory state
         printGPUMemoryInfo();
         
-        // Save the trained model
-        std::string model_file = "model_checkpoints/trained_model.bin";
-        std::cout << "\n=== Saving Model ===" << std::endl;
-        model.save_weights(model_file);
-        std::cout << "Model saved to: " << model_file << std::endl;
-        
         // Additional statistics
         std::cout << "\n=== Additional Statistics ===" << std::endl;
         std::cout << "Images per Second (Training): " << std::fixed << std::setprecision(1)

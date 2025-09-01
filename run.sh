@@ -4,6 +4,7 @@
 # This script provides a convenient way to run the model demo with optimized parameters
 
 # Optimized parameters that achieved 81.82% validation accuracy and 80.69% test accuracy
+OUTPUT_DIR="data/output"
 OPTIMIZED_ARGS="--random_seed 42 --epochs 20 --batch_size 128 --learning_rate 0.001 --max_gradient_norm 10.0 --weight_decay 0.0001"
 
 # Function to show usage
@@ -44,5 +45,12 @@ else
     ARGS="$@"
 fi
 
+make clean-all
+
+make download-data
+make extract-data
+
+mkdir $OUTPUT_DIR
 # Run using make with the arguments
-exec make run-model-demo ARGS="$ARGS"
+make run-unit-tests 2>&1 | tee $OUTPUT_DIR/unittesting.log
+make run-model-demo ARGS="$ARGS" 2>&1 | tee $OUTPUT_DIR/model_training.log

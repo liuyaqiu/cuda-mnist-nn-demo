@@ -1,0 +1,755 @@
+Creating Google Test directory...
+mkdir -p third_party/googletest
+Downloading and building Google Test 1.14.0...
+Downloading Google Test source...
+Building Google Test...
+-- The C compiler identification is GNU 13.3.0
+-- The CXX compiler identification is GNU 13.3.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Found Python3: /home/liuyaqiu/.local/share/mise/installs/python/3.10.18/bin/python3 (found version "3.10.18") found components: Interpreter 
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE  
+-- Configuring done (0.5s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build
+make[1]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[2]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[3]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[3]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[3]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+[ 25%] Building CXX object googletest/CMakeFiles/gtest.dir/src/gtest-all.cc.o
+[ 50%] Linking CXX static library ../lib/libgtest.a
+make[3]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+[ 50%] Built target gtest
+make[3]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[3]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[3]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+[ 75%] Building CXX object googletest/CMakeFiles/gtest_main.dir/src/gtest_main.cc.o
+[100%] Linking CXX static library ../lib/libgtest_main.a
+make[3]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+[100%] Built target gtest_main
+make[2]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[1]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[1]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[2]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[3]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[3]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+[ 50%] Built target gtest
+make[3]: Entering directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+make[3]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+[100%] Built target gtest_main
+make[2]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+Install the project...
+-- Install configuration: "Release"
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/lib/cmake/GTest/GTestTargets.cmake
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/lib/cmake/GTest/GTestTargets-release.cmake
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/lib/cmake/GTest/GTestConfigVersion.cmake
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/lib/cmake/GTest/GTestConfig.cmake
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest-matchers.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest-message.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest-spi.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest-death-test.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest-param-test.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest-printers.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest-test-part.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest-typed-test.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/gtest-port-arch.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/gtest-string.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/gtest-param-util.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/gtest-death-test-internal.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/custom
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/custom/README.md
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/custom/gtest.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/custom/gtest-printers.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/custom/gtest-port.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/gtest-internal.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/gtest-port.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/gtest-filepath.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/internal/gtest-type-util.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest-assertion-result.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest_prod.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/include/gtest/gtest_pred_impl.h
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/lib/libgtest.a
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/lib/libgtest_main.a
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/lib/pkgconfig/gtest.pc
+-- Installing: /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/install/lib/pkgconfig/gtest_main.pc
+make[1]: Leaving directory '/home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/build'
+Google Test installed successfully in third_party/googletest/install
+Compiling neural network unit tests with detected GPU architecture: sm_86
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++17 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib --relocatable-device-code=true --compile -Ithird_party/googletest/install/include tests/nn_utils_test.cu -o obj/nn_utils_test.o
+Compiling neural network utils with detected GPU architecture: sm_86
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++17 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib --relocatable-device-code=true --compile lib/nn_utils.cu -o obj/nn_utils.o
+Linking neural network unit tests with Google Test
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++17 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib obj/nn_utils_test.o obj/nn_utils.o -o bin/nn_utils_test -L/usr/local/cuda/lib64 -Llib -LCommon/lib -lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc -lfreeimage -lcutensor -lm -Lthird_party/googletest/install/lib -lgtest -lgtest_main -lpthread
+Compiling data loader unit tests with detected GPU architecture: sm_86
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++17 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib --relocatable-device-code=true --compile -Ithird_party/googletest/install/include tests/data_loader_test.cu -o obj/data_loader_test.o
+Compiling data loader with detected GPU architecture: sm_86
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++17 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib --relocatable-device-code=true --compile lib/data_loader.cu -o obj/data_loader.o
+Linking data loader unit tests with Google Test
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++17 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib obj/data_loader_test.o obj/data_loader.o -o bin/data_loader_test -L/usr/local/cuda/lib64 -Llib -LCommon/lib -lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc -lfreeimage -lcutensor -lm -Lthird_party/googletest/install/lib -lgtest -lgtest_main -lpthread
+Compiling model unit tests with detected GPU architecture: sm_86
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++17 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib --relocatable-device-code=true --compile -Ithird_party/googletest/install/include tests/model_test.cu -o obj/model_test.o
+Compiling model with detected GPU architecture: sm_86
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++17 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib --relocatable-device-code=true --compile lib/model.cu -o obj/model.o
+Linking model unit tests with Google Test
+/usr/local/cuda/bin/nvcc -arch=sm_86 --std=c++17 -I/usr/local/cuda/include -Iinclude -ICommon -ICommon/UtilNPP -ICommon/GL -Ilib obj/model_test.o obj/model.o obj/nn_utils.o obj/data_loader.o -o bin/model_test -L/usr/local/cuda/lib64 -Llib -LCommon/lib -lcudart -lnppc -lnppial -lnppicc -lnppidei -lnppif -lnppig -lnppim -lnppist -lnppisu -lnppitc -lfreeimage -lcutensor -lm -Lthird_party/googletest/install/lib -lgtest -lgtest_main -lpthread
+Running all unit tests
+./bin/nn_utils_test
+[==========] Running 11 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 11 tests from NNUtilsTest
+[ RUN      ] NNUtilsTest.MatrixMultiplyWithWrapper
+[       OK ] NNUtilsTest.MatrixMultiplyWithWrapper (2178 ms)
+[ RUN      ] NNUtilsTest.NeuralLayerForwardPass
+[       OK ] NNUtilsTest.NeuralLayerForwardPass (48 ms)
+[ RUN      ] NNUtilsTest.ElementwiseBroadcasting
+[       OK ] NNUtilsTest.ElementwiseBroadcasting (1 ms)
+[ RUN      ] NNUtilsTest.ReductionOperations
+[       OK ] NNUtilsTest.ReductionOperations (2 ms)
+[ RUN      ] NNUtilsTest.NeuralLayerBackwardPass
+[       OK ] NNUtilsTest.NeuralLayerBackwardPass (5 ms)
+[ RUN      ] NNUtilsTest.NeuralNetworkConstruction
+[       OK ] NNUtilsTest.NeuralNetworkConstruction (3 ms)
+[ RUN      ] NNUtilsTest.NeuralNetworkForwardPass
+[       OK ] NNUtilsTest.NeuralNetworkForwardPass (4 ms)
+[ RUN      ] NNUtilsTest.NeuralNetworkBackwardPass
+[       OK ] NNUtilsTest.NeuralNetworkBackwardPass (11 ms)
+[ RUN      ] NNUtilsTest.NeuralNetworkPrediction
+[       OK ] NNUtilsTest.NeuralNetworkPrediction (3 ms)
+[ RUN      ] NNUtilsTest.NeuralNetworkSimpleTraining
+[       OK ] NNUtilsTest.NeuralNetworkSimpleTraining (229 ms)
+[ RUN      ] NNUtilsTest.GradientClippingStability
+[       OK ] NNUtilsTest.GradientClippingStability (95 ms)
+[----------] 11 tests from NNUtilsTest (2586 ms total)
+
+[----------] Global test environment tear-down
+[==========] 11 tests from 1 test suite ran. (2586 ms total)
+[  PASSED  ] 11 tests.
+./bin/data_loader_test
+Running main() from /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/googletest-1.14.0/googletest/src/gtest_main.cc
+[==========] Running 15 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 15 tests from DataLoaderTest
+[ RUN      ] DataLoaderTest.ConstructorValidation
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0.2
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 1
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 1
+[       OK ] DataLoaderTest.ConstructorValidation (1 ms)
+[ RUN      ] DataLoaderTest.ImageDiscovery
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0.2
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 8 training images and 1 validation images
+[       OK ] DataLoaderTest.ImageDiscovery (1 ms)
+[ RUN      ] DataLoaderTest.EmptyDirectory
+DataLoader initialized with input_path: empty_test_dir, validation_ratio: 0.2
+Discovering image files in: empty_test_dir
+No image files found in: empty_test_dir
+[       OK ] DataLoaderTest.EmptyDirectory (0 ms)
+[ RUN      ] DataLoaderTest.NonExistentDirectory
+DataLoader initialized with input_path: non_existent_dir, validation_ratio: 0.2
+Discovering image files in: non_existent_dir
+Error: Input path does not exist or is not a directory: non_existent_dir
+No image files found in: non_existent_dir
+[       OK ] DataLoaderTest.NonExistentDirectory (0 ms)
+[ RUN      ] DataLoaderTest.DatasetSplitting
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 9 training images and 0 validation images
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0.2
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 8 training images and 1 validation images
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0.5
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 5 training images and 4 validation images
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0.8
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 2 training images and 7 validation images
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 1
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 0 training images and 9 validation images
+[       OK ] DataLoaderTest.DatasetSplitting (1 ms)
+[ RUN      ] DataLoaderTest.BatchLoading
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0.3
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 7 training images and 2 validation images
+[       OK ] DataLoaderTest.BatchLoading (1 ms)
+[ RUN      ] DataLoaderTest.DataNormalization
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 9 training images and 0 validation images
+[       OK ] DataLoaderTest.DataNormalization (0 ms)
+[ RUN      ] DataLoaderTest.IteratorBehavior
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0.3
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 7 training images and 2 validation images
+[       OK ] DataLoaderTest.IteratorBehavior (1 ms)
+[ RUN      ] DataLoaderTest.ValidationDataLoading
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0.4
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 6 training images and 3 validation images
+[       OK ] DataLoaderTest.ValidationDataLoading (0 ms)
+[ RUN      ] DataLoaderTest.PartialBatchHandling
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 9 training images and 0 validation images
+[       OK ] DataLoaderTest.PartialBatchHandling (1 ms)
+[ RUN      ] DataLoaderTest.LabelParsing
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 9 training images and 0 validation images
+[       OK ] DataLoaderTest.LabelParsing (0 ms)
+[ RUN      ] DataLoaderTest.ShufflingBehavior
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 9 training images and 0 validation images
+[       OK ] DataLoaderTest.ShufflingBehavior (1 ms)
+[ RUN      ] DataLoaderTest.DifferentImageFormats
+DataLoader initialized with input_path: format_test_dir, validation_ratio: 0
+Discovering image files in: format_test_dir
+Found 3 image files
+Image dimensions: 16x16x1
+Dataset initialized with 3 training images and 0 validation images
+[       OK ] DataLoaderTest.DifferentImageFormats (0 ms)
+[ RUN      ] DataLoaderTest.CorruptedImageHandling
+DataLoader initialized with input_path: corrupt_test_dir, validation_ratio: 0
+Discovering image files in: corrupt_test_dir
+Found 1 image files
+Failed to determine image dimensions from: corrupt_test_dir/0/corrupt.png
+[       OK ] DataLoaderTest.CorruptedImageHandling (1 ms)
+[ RUN      ] DataLoaderTest.LargeBatchPerformance
+DataLoader initialized with input_path: test_data_temp, validation_ratio: 0
+Discovering image files in: test_data_temp
+Found 9 image files
+Image dimensions: 28x28x1
+Dataset initialized with 9 training images and 0 validation images
+[       OK ] DataLoaderTest.LargeBatchPerformance (1 ms)
+[----------] 15 tests from DataLoaderTest (16 ms total)
+
+[----------] Global test environment tear-down
+[==========] 15 tests from 1 test suite ran. (16 ms total)
+[  PASSED  ] 15 tests.
+./bin/model_test
+Running main() from /home/liuyaqiu/Code/cuda-mnist-nn-demo/third_party/googletest/googletest-1.14.0/googletest/src/gtest_main.cc
+[==========] Running 17 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 17 tests from ModelTest
+[ RUN      ] ModelTest.ConstructorAndInitialization
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.2
+DataLoader initialized with input_path: model_test_data_2, validation_ratio: 0
+Model created with architecture: 784 -> 128 -> 64 -> 10
+Total parameters: 109386
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 48 training images and 12 validation images
+Discovering image files in: model_test_data_2
+Found 30 image files
+Image dimensions: 28x28x1
+Dataset initialized with 30 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 48 samples
+Validation dataset: 12 samples
+Test dataset: 30 samples
+Model is already initialized.
+[       OK ] ModelTest.ConstructorAndInitialization (93 ms)
+[ RUN      ] ModelTest.InvalidArchitecture
+[       OK ] ModelTest.InvalidArchitecture (4 ms)
+[ RUN      ] ModelTest.BasicTraining
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.2
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 48 training images and 12 validation images
+Model initialized successfully.
+Training dataset: 48 samples
+Validation dataset: 12 samples
+
+=== Starting Training ===
+Epochs: 2
+Batch size: 10
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1 [==================================================] 100% Batch 5/5 - Loss: 0.3688 - Acc: 33.33%
+Epoch 1/2 - Time: 0s - Train Loss: 0.3683 - Val Loss: 0.2694 - Val Acc: 40.00%
+Epoch 2 [==================================================] 100% Batch 5/5 - Loss: 0.2893 - Acc: 66.67%
+Epoch 2/2 - Time: 0s - Train Loss: 0.3223 - Val Loss: 0.2776 - Val Acc: 40.00%
+
+=== Training Complete ===
+Best validation accuracy: 40.0000%
+[       OK ] ModelTest.BasicTraining (381 ms)
+[ RUN      ] ModelTest.TrainingWithoutValidation
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.0000
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 20
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.3182 - Train Acc: 27.78%
+
+=== Training Complete ===
+[       OK ] ModelTest.TrainingWithoutValidation (47 ms)
+[ RUN      ] ModelTest.ModelEvaluation
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.10
+DataLoader initialized with input_path: model_test_data_2, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 54 training images and 6 validation images
+Discovering image files in: model_test_data_2
+Found 30 image files
+Image dimensions: 28x28x1
+Dataset initialized with 30 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 54 samples
+Validation dataset: 6 samples
+Test dataset: 30 samples
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 10
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.3597 - Val Loss: 0.3774 - Val Acc: 0.00%
+
+=== Training Complete ===
+Best validation accuracy: 0.0000%
+
+=== Evaluating on Test Set ===
+Test Accuracy: 22.22%
+Test Loss: 0.3684
+Correct: 2/9
+
+Per-class accuracy:
+Class 0: 0.00%
+Class 1: 0.00%
+Class 2: 100.00%
+[       OK ] ModelTest.ModelEvaluation (67 ms)
+[ RUN      ] ModelTest.Prediction
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+[       OK ] ModelTest.Prediction (9 ms)
+[ RUN      ] ModelTest.SinglePrediction
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+[       OK ] ModelTest.SinglePrediction (8 ms)
+[ RUN      ] ModelTest.SaveAndLoadWeights
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 10
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.3587 - Train Acc: 27.78%
+
+=== Training Complete ===
+Model weights saved to: test_model_weights.bin
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+Model weights loaded from: test_model_weights.bin
+[       OK ] ModelTest.SaveAndLoadWeights (89 ms)
+[ RUN      ] ModelTest.LoadWeightsMismatchedArchitecture
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+Model weights saved to: test_model_weights_mismatch.bin
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 64 -> 3
+Total parameters: 50435
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+[       OK ] ModelTest.LoadWeightsMismatchedArchitecture (7 ms)
+[ RUN      ] ModelTest.DifferentBatchSizes
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 1
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.8674 - Train Acc: 100.00%
+
+=== Training Complete ===
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 5
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.4043 - Train Acc: 37.50%
+
+=== Training Complete ===
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 10
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.3549 - Train Acc: 50.00%
+
+=== Training Complete ===
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 20
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.3584 - Train Acc: 22.22%
+
+=== Training Complete ===
+[       OK ] ModelTest.DifferentBatchSizes (937 ms)
+[ RUN      ] ModelTest.UninitializedModelErrors
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.20
+DataLoader initialized with input_path: model_test_data_2, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+[       OK ] ModelTest.UninitializedModelErrors (4 ms)
+[ RUN      ] ModelTest.NoTestDataLoader
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.20
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 48 training images and 12 validation images
+Model initialized successfully.
+Training dataset: 48 samples
+Validation dataset: 12 samples
+[       OK ] ModelTest.NoTestDataLoader (5 ms)
+[ RUN      ] ModelTest.PredictionBatchSizeLimit
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.00
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+[       OK ] ModelTest.PredictionBatchSizeLimit (5 ms)
+[ RUN      ] ModelTest.TrainingConfigurationEdgeCases
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.20
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 48 training images and 12 validation images
+Model initialized successfully.
+Training dataset: 48 samples
+Validation dataset: 12 samples
+
+=== Starting Training ===
+Epochs: 0
+Batch size: 64
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+
+=== Training Complete ===
+Best validation accuracy: 0.0000%
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 64
+Learning rate: 0.0000
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.3470 - Val Loss: 0.2009 - Val Acc: 50.00%
+
+=== Training Complete ===
+Best validation accuracy: 50.0000%
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 64
+Learning rate: 0.0100
+Momentum: 0.0000
+Weight decay: 0.0000
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.3709 - Val Loss: 0.1995 - Val Acc: 41.67%
+
+=== Training Complete ===
+Best validation accuracy: 41.6667%
+[       OK ] ModelTest.TrainingConfigurationEdgeCases (33 ms)
+[ RUN      ] ModelTest.LargerArchitecture
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.1000
+Model created with architecture: 784 -> 256 -> 128 -> 64 -> 32 -> 3
+Total parameters: 244291
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 54 training images and 6 validation images
+Model initialized successfully.
+Training dataset: 54 samples
+Validation dataset: 6 samples
+
+=== Starting Training ===
+Epochs: 1
+Batch size: 10
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1/1 - Time: 0s - Train Loss: 0.3474 - Val Loss: 0.2947 - Val Acc: 33.33%
+
+=== Training Complete ===
+Best validation accuracy: 33.3333%
+[       OK ] ModelTest.LargerArchitecture (120 ms)
+[ RUN      ] ModelTest.MemoryManagementStressTest
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.0000
+Model created with architecture: 784 -> 32 -> 3
+Total parameters: 25219
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 60 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 60 samples
+Validation dataset: 0 samples
+[       OK ] ModelTest.MemoryManagementStressTest (202 ms)
+[ RUN      ] ModelTest.TrainingMetrics
+DataLoader initialized with input_path: model_test_data, validation_ratio: 0.2000
+DataLoader initialized with input_path: model_test_data_2, validation_ratio: 0.0000
+Model created with architecture: 784 -> 64 -> 3
+Total parameters: 50435
+Initializing model...
+Discovering image files in: model_test_data
+Found 60 image files
+Image dimensions: 28x28x1
+Dataset initialized with 48 training images and 12 validation images
+Discovering image files in: model_test_data_2
+Found 30 image files
+Image dimensions: 28x28x1
+Dataset initialized with 30 training images and 0 validation images
+Model initialized successfully.
+Training dataset: 48 samples
+Validation dataset: 12 samples
+Test dataset: 30 samples
+
+=== Starting Training ===
+Epochs: 3
+Batch size: 10
+Learning rate: 0.0100
+Momentum: 0.9000
+Weight decay: 0.0001
+Gradient clipping: 5.0000
+========================
+
+Epoch 1 [==================================================] 100% Batch 5/5 - Loss: 0.3007 - Acc: 66.67%
+Epoch 1/3 - Time: 0s - Train Loss: 0.3281 - Val Loss: 0.2432 - Val Acc: 80.00%
+Epoch 2 [==================================================] 100% Batch 5/5 - Loss: 0.3126 - Acc: 33.33%
+Epoch 2/3 - Time: 0s - Train Loss: 0.3174 - Val Loss: 0.2424 - Val Acc: 80.00%
+Epoch 3 [==================================================] 100% Batch 5/5 - Loss: 0.3496 - Acc: 66.67%
+Epoch 3/3 - Time: 0s - Train Loss: 0.3557 - Val Loss: 0.2599 - Val Acc: 80.00%
+
+=== Training Complete ===
+Best validation accuracy: 80.0000%
+[       OK ] ModelTest.TrainingMetrics (150 ms)
+[----------] 17 tests from ModelTest (2171 ms total)
+
+[----------] Global test environment tear-down
+[==========] 17 tests from 1 test suite ran. (2171 ms total)
+[  PASSED  ] 17 tests.

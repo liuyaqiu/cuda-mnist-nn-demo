@@ -1,0 +1,7 @@
+[tools]
+python = "3.10"
+
+[tasks]
+# Install Python dependencies for dataset utilities
+pip-install.run = "python -m pip install -r requirements.txt"
+pip-install.description = "Install Python dependencies via project Python"
